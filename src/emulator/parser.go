@@ -3,6 +3,7 @@ package emulator
 import (
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // ParserState represents the parser state machine state
@@ -23,14 +24,17 @@ const (
 
 // Parser is an ANSI/xterm escape sequence parser
 type Parser struct {
-	state       ParserState
-	screen      *Screen
-	scrollback  *Scrollback
-	params      []int
+	state        ParserState
+	screen       *Screen
+	scrollback   *Scrollback
+	params       []int
 	intermediate string
-	oscString   strings.Builder
-	title       string
-	onTitle     func(string)
+	oscString    strings.Builder
+	title        string
+	onTitle      func(string)
+	utf8Buf      [4]byte // Buffer for UTF-8 multi-byte sequences
+	utf8Len      int     // Current bytes in utf8Buf
+	utf8Need     int     // Total bytes needed for current sequence
 }
 
 // NewParser creates a new parser connected to a screen and scrollback
@@ -95,6 +99,33 @@ func (p *Parser) parseByte(b byte) {
 }
 
 func (p *Parser) parseGround(b byte) {
+	// If we're in the middle of a UTF-8 sequence, continue it
+	if p.utf8Need > 0 {
+		if b >= 0x80 && b < 0xC0 { // Valid continuation byte
+			p.utf8Buf[p.utf8Len] = b
+			p.utf8Len++
+			if p.utf8Len == p.utf8Need {
+				// Complete sequence - decode and write
+				r, _ := utf8.DecodeRune(p.utf8Buf[:p.utf8Len])
+				if r != utf8.RuneError {
+					p.screen.Write(r)
+				}
+				p.utf8Need = 0
+				p.utf8Len = 0
+			}
+		} else {
+			// Invalid continuation - reset and process this byte normally
+			p.utf8Need = 0
+			p.utf8Len = 0
+			p.parseGroundByte(b)
+		}
+		return
+	}
+
+	p.parseGroundByte(b)
+}
+
+func (p *Parser) parseGroundByte(b byte) {
 	switch {
 	case b == 0x1b: // ESC
 		p.state = StateEscape
@@ -116,8 +147,18 @@ func (p *Parser) parseGround(b byte) {
 		p.screen.cursor.X = 0
 	case b >= 0x20 && b < 0x7f: // Printable ASCII
 		p.screen.Write(rune(b))
-	case b >= 0x80: // UTF-8 continuation - handle as printable
-		p.screen.Write(rune(b))
+	case b >= 0xC0 && b < 0xE0: // 2-byte UTF-8 start
+		p.utf8Buf[0] = b
+		p.utf8Len = 1
+		p.utf8Need = 2
+	case b >= 0xE0 && b < 0xF0: // 3-byte UTF-8 start
+		p.utf8Buf[0] = b
+		p.utf8Len = 1
+		p.utf8Need = 3
+	case b >= 0xF0 && b < 0xF8: // 4-byte UTF-8 start
+		p.utf8Buf[0] = b
+		p.utf8Len = 1
+		p.utf8Need = 4
 	}
 }
 

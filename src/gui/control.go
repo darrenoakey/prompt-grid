@@ -29,7 +29,7 @@ type ControlWindow struct {
 	shaper     *text.Shaper
 	ops        op.Ops
 	selected   string
-	tabs       []tabState
+	tabStates  map[string]*tabState // Persistent tab states keyed by name
 }
 
 type tabState struct {
@@ -41,8 +41,9 @@ type tabState struct {
 // NewControlWindow creates the control center window
 func NewControlWindow(application *App) *ControlWindow {
 	win := &ControlWindow{
-		app:    application,
-		window: new(app.Window),
+		app:       application,
+		window:    new(app.Window),
+		tabStates: make(map[string]*tabState),
 	}
 
 	win.window.Option(
@@ -50,7 +51,7 @@ func NewControlWindow(application *App) *ControlWindow {
 		app.Size(unit.Dp(1000), unit.Dp(600)),
 	)
 
-	win.shaper = text.NewShaper(text.NoSystemFonts(), text.WithCollection(render.CreateFontCollection()))
+	win.shaper = text.NewShaper(text.WithCollection(render.CreateFontCollection()))
 	return win
 }
 
@@ -69,11 +70,28 @@ func (w *ControlWindow) Run() error {
 }
 
 func (w *ControlWindow) layout(gtx layout.Context) {
-	// Update tabs from sessions
+	// Get current sessions
 	sessions := w.app.ListSessions()
-	w.tabs = make([]tabState, len(sessions))
-	for i, name := range sessions {
-		w.tabs[i] = tabState{name: name}
+
+	// Ensure we have persistent tab state for each session
+	for _, name := range sessions {
+		if _, exists := w.tabStates[name]; !exists {
+			w.tabStates[name] = &tabState{name: name}
+		}
+	}
+
+	// Clean up stale tab states
+	for name := range w.tabStates {
+		found := false
+		for _, s := range sessions {
+			if s == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			delete(w.tabStates, name)
+		}
 	}
 
 	if w.selected == "" && len(sessions) > 0 {
@@ -104,12 +122,16 @@ func (w *ControlWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 40, G: 40, B: 40, A: 255}, rect)
 
 	// Layout tabs vertically
+	sessions := w.app.ListSessions()
 	var dims layout.Dimensions
 	offsetY := 0
-	for i := range w.tabs {
-		idx := i
+	for _, name := range sessions {
+		tab := w.tabStates[name]
+		if tab == nil {
+			continue
+		}
 		stack := op.Offset(image.Pt(0, offsetY)).Push(gtx.Ops)
-		d := w.layoutTab(gtx, idx)
+		d := w.layoutTab(gtx, tab)
 		stack.Pop()
 		offsetY += d.Size.Y
 		dims.Size.Y = offsetY
@@ -119,20 +141,19 @@ func (w *ControlWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
 	return dims
 }
 
-func (w *ControlWindow) layoutTab(gtx layout.Context, idx int) layout.Dimensions {
-	tab := &w.tabs[idx]
+func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState) layout.Dimensions {
 	height := 40
 
-	// Get session colors for this tab
+	// Get session colors for this tab - use exact session colors
 	state := w.app.GetSession(tab.name)
-	var sessionBg color.NRGBA
+	var sessionBg, sessionFg color.NRGBA
 	if state != nil {
 		sessionBg = state.Colors().Background
+		sessionFg = state.Colors().Foreground
 	} else {
 		sessionBg = color.NRGBA{R: 60, G: 60, B: 60, A: 255}
+		sessionFg = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
 	}
-	// Always use light text on the dark sidebar
-	textColor := color.NRGBA{R: 220, G: 220, B: 220, A: 255}
 
 	// Handle input
 	areaStack := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Push(gtx.Ops)
@@ -159,40 +180,33 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, idx int) layout.Dimensions
 	}
 	areaStack.Pop()
 
-	// Draw dark background first
-	baseBg := color.NRGBA{R: 30, G: 30, B: 30, A: 255}
+	// Draw session background color for entire tab
 	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
-	paint.FillShape(gtx.Ops, baseBg, rect)
+	paint.FillShape(gtx.Ops, sessionBg, rect)
 
-	// Draw color indicator bar on the left
-	colorBarWidth := 6
-	colorRect := clip.Rect{
-		Min: image.Point{X: 0, Y: 4},
-		Max: image.Point{X: colorBarWidth, Y: height - 4},
-	}.Op()
-	paint.FillShape(gtx.Ops, sessionBg, colorRect)
-
-	// Highlight selected/hovered
+	// Add visual feedback for selected/hovered with semi-transparent overlay
 	if tab.name == w.selected {
+		// White highlight for selected
 		highlightRect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
-		paint.FillShape(gtx.Ops, color.NRGBA{R: 60, G: 60, B: 80, A: 100}, highlightRect)
+		paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 40}, highlightRect)
 	} else if tab.hovered {
+		// Subtle white highlight for hovered
 		highlightRect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
-		paint.FillShape(gtx.Ops, color.NRGBA{R: 50, G: 50, B: 50, A: 100}, highlightRect)
+		paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 20}, highlightRect)
 	}
 
-	// Draw tab name using material label
+	// Draw tab name using session's foreground color
 	th := material.NewTheme()
 	th.Shaper = w.shaper
 	label := material.Label(th, unit.Sp(14), tab.name)
-	label.Color = textColor
+	label.Color = sessionFg
 
-	// Position label with padding (after color bar)
-	stack := op.Offset(image.Pt(colorBarWidth+10, 10)).Push(gtx.Ops)
+	// Position label with padding
+	stack := op.Offset(image.Pt(12, 10)).Push(gtx.Ops)
 	labelGtx := gtx
 	labelGtx.Constraints = layout.Constraints{
 		Min: image.Point{X: 0, Y: 0},
-		Max: image.Point{X: tabWidth - colorBarWidth - 20, Y: height - 10},
+		Max: image.Point{X: tabWidth - 24, Y: height - 10},
 	}
 	label.Layout(labelGtx)
 	stack.Pop()
@@ -249,24 +263,29 @@ func (w *ControlWindow) handleTerminalInput(gtx layout.Context, state *SessionSt
 	areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
 	event.Op(gtx.Ops, state)
 
+	// Process all key events
 	for {
 		ev, ok := gtx.Event(
-			key.Filter{Focus: state},
+			key.Filter{Optional: key.ModShift | key.ModCtrl},
 		)
 		if !ok {
 			break
 		}
 		switch e := ev.(type) {
+		case key.EditEvent:
+			if len(e.Text) > 0 {
+				state.session.Write([]byte(e.Text))
+			}
 		case key.Event:
 			if e.State == key.Press {
-				w.handleKey(state, e)
+				w.handleKeyEvent(state, e)
 			}
 		}
 	}
 	areaStack.Pop()
 }
 
-func (w *ControlWindow) handleKey(state *SessionState, e key.Event) {
+func (w *ControlWindow) handleKeyEvent(state *SessionState, e key.Event) {
 	var data []byte
 
 	switch e.Name {
@@ -286,17 +305,35 @@ func (w *ControlWindow) handleKey(state *SessionState, e key.Event) {
 		data = []byte{0x1b, '[', 'C'}
 	case key.NameLeftArrow:
 		data = []byte{0x1b, '[', 'D'}
+	case key.NameHome:
+		data = []byte{0x1b, '[', 'H'}
+	case key.NameEnd:
+		data = []byte{0x1b, '[', 'F'}
+	case key.NamePageUp:
+		data = []byte{0x1b, '[', '5', '~'}
+	case key.NamePageDown:
+		data = []byte{0x1b, '[', '6', '~'}
+	case key.NameDeleteForward:
+		data = []byte{0x1b, '[', '3', '~'}
+	case key.NameSpace:
+		data = []byte{' '}
 	default:
 		if len(e.Name) == 1 {
 			ch := e.Name[0]
 			if e.Modifiers.Contain(key.ModCtrl) {
-				if ch >= 'a' && ch <= 'z' {
-					data = []byte{ch - 'a' + 1}
-				} else if ch >= 'A' && ch <= 'Z' {
+				if ch >= 'A' && ch <= 'Z' {
 					data = []byte{ch - 'A' + 1}
+				} else if ch >= 'a' && ch <= 'z' {
+					data = []byte{ch - 'a' + 1}
 				}
+			} else if e.Modifiers.Contain(key.ModShift) {
+				data = []byte{shiftChar(ch)}
 			} else {
-				data = []byte(e.Name)
+				if ch >= 'A' && ch <= 'Z' {
+					data = []byte{ch + 32}
+				} else {
+					data = []byte{ch}
+				}
 			}
 		}
 	}
@@ -304,6 +341,26 @@ func (w *ControlWindow) handleKey(state *SessionState, e key.Event) {
 	if len(data) > 0 {
 		state.session.Write(data)
 	}
+}
+
+func shiftChar(ch byte) byte {
+	if ch >= 'A' && ch <= 'Z' {
+		return ch
+	}
+	if ch >= 'a' && ch <= 'z' {
+		return ch - 32
+	}
+	shiftMap := map[byte]byte{
+		'1': '!', '2': '@', '3': '#', '4': '$', '5': '%',
+		'6': '^', '7': '&', '8': '*', '9': '(', '0': ')',
+		'-': '_', '=': '+', '[': '{', ']': '}', '\\': '|',
+		';': ':', '\'': '"', ',': '<', '.': '>', '/': '?',
+		'`': '~',
+	}
+	if shifted, ok := shiftMap[ch]; ok {
+		return shifted
+	}
+	return ch
 }
 
 // Close closes the control window

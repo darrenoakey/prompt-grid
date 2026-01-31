@@ -66,7 +66,12 @@ func (s *Session) SetOnExit(fn func(error)) {
 
 // Start spawns a shell in the PTY
 func (s *Session) Start() error {
-	return s.StartCommand(os.Getenv("SHELL"), nil)
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/zsh"
+	}
+	// Start as interactive login shell to load user config
+	return s.StartCommand(shell, []string{"-l", "-i"})
 }
 
 // StartCommand spawns a command in the PTY

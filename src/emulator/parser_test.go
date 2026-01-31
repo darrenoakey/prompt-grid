@@ -277,3 +277,39 @@ func TestParserReset(t *testing.T) {
 		t.Error("Screen should be cleared after reset")
 	}
 }
+
+func TestParserUTF8(t *testing.T) {
+	p := newTestParser()
+
+	// Test various UTF-8 characters:
+	// - Box drawing: │ (U+2502, 3 bytes: E2 94 82)
+	// - Emoji: ✓ (U+2713, 3 bytes: E2 9C 93)
+	// - Japanese: 日 (U+65E5, 3 bytes: E6 97 A5)
+	p.Parse([]byte("A│B✓C日D"))
+
+	expected := []rune{'A', '│', 'B', '✓', 'C', '日', 'D'}
+	for i, want := range expected {
+		got := p.screen.Cell(i, 0).Rune
+		if got != want {
+			t.Errorf("Cell(%d,0) = %q (U+%04X), want %q (U+%04X)", i, got, got, want, want)
+		}
+	}
+
+	if p.screen.cursor.X != 7 {
+		t.Errorf("cursor.X = %d, want 7", p.screen.cursor.X)
+	}
+}
+
+func TestParserUTF8Split(t *testing.T) {
+	p := newTestParser()
+
+	// Test UTF-8 bytes arriving in separate Parse calls
+	// │ = E2 94 82
+	p.Parse([]byte{0xE2})
+	p.Parse([]byte{0x94})
+	p.Parse([]byte{0x82})
+
+	if p.screen.Cell(0, 0).Rune != '│' {
+		t.Errorf("Cell(0,0) = %q, want '│'", p.screen.Cell(0, 0).Rune)
+	}
+}

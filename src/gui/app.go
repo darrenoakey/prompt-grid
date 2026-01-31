@@ -21,6 +21,11 @@ type App struct {
 	controlWin *ControlWindow
 }
 
+// SelectionPoint represents a position in the terminal
+type SelectionPoint struct {
+	X, Y int
+}
+
 // SessionState holds state for a single session
 type SessionState struct {
 	session    *pty.Session
@@ -29,6 +34,12 @@ type SessionState struct {
 	scrollback *emulator.Scrollback
 	window     *TerminalWindow
 	colors     render.SessionColor // Unique color for this session
+
+	// Selection state
+	selStart    SelectionPoint
+	selEnd      SelectionPoint
+	selecting   bool // Mouse is currently being dragged
+	hasSelection bool // There is an active selection
 }
 
 // Session returns the PTY session
@@ -49,6 +60,115 @@ func (s *SessionState) Scrollback() *emulator.Scrollback {
 // Colors returns the session-specific color scheme
 func (s *SessionState) Colors() render.SessionColor {
 	return s.colors
+}
+
+// StartSelection begins a new selection at the given cell position
+func (s *SessionState) StartSelection(x, y int) {
+	s.selStart = SelectionPoint{X: x, Y: y}
+	s.selEnd = SelectionPoint{X: x, Y: y}
+	s.selecting = true
+	s.hasSelection = true
+}
+
+// UpdateSelection updates the end point of the current selection
+func (s *SessionState) UpdateSelection(x, y int) {
+	if s.selecting {
+		s.selEnd = SelectionPoint{X: x, Y: y}
+	}
+}
+
+// EndSelection finishes the current selection
+func (s *SessionState) EndSelection() {
+	s.selecting = false
+}
+
+// ClearSelection removes the current selection
+func (s *SessionState) ClearSelection() {
+	s.hasSelection = false
+	s.selecting = false
+}
+
+// HasSelection returns whether there is an active selection
+func (s *SessionState) HasSelection() bool {
+	return s.hasSelection
+}
+
+// IsSelected returns whether the given cell is within the selection
+func (s *SessionState) IsSelected(x, y int) bool {
+	if !s.hasSelection {
+		return false
+	}
+
+	// Normalize selection (start before end)
+	startY, startX := s.selStart.Y, s.selStart.X
+	endY, endX := s.selEnd.Y, s.selEnd.X
+
+	if startY > endY || (startY == endY && startX > endX) {
+		startY, endY = endY, startY
+		startX, endX = endX, startX
+	}
+
+	// Check if point is in selection range
+	if y < startY || y > endY {
+		return false
+	}
+	if y == startY && y == endY {
+		return x >= startX && x <= endX
+	}
+	if y == startY {
+		return x >= startX
+	}
+	if y == endY {
+		return x <= endX
+	}
+	return true
+}
+
+// GetSelectedText returns the text within the current selection
+func (s *SessionState) GetSelectedText() string {
+	if !s.hasSelection {
+		return ""
+	}
+
+	// Normalize selection
+	startY, startX := s.selStart.Y, s.selStart.X
+	endY, endX := s.selEnd.Y, s.selEnd.X
+
+	if startY > endY || (startY == endY && startX > endX) {
+		startY, endY = endY, startY
+		startX, endX = endX, startX
+	}
+
+	cols, _ := s.screen.Size()
+	var result []rune
+
+	for y := startY; y <= endY; y++ {
+		lineStart := 0
+		lineEnd := cols - 1
+
+		if y == startY {
+			lineStart = startX
+		}
+		if y == endY {
+			lineEnd = endX
+		}
+
+		for x := lineStart; x <= lineEnd; x++ {
+			cell := s.screen.Cell(x, y)
+			if cell.Rune == 0 {
+				result = append(result, ' ')
+			} else {
+				result = append(result, cell.Rune)
+			}
+		}
+
+		// Add newline between lines (but not at the end)
+		if y < endY {
+			result = append(result, '\n')
+		}
+	}
+
+	return string(result)
 }
 
 // NewApp creates a new application
@@ -175,5 +295,47 @@ func (a *App) CreateControlWindow() *ControlWindow {
 // Run starts the application event loop
 func (a *App) Run() error {
 	app.Main()
+	return nil
+}
+
+// AddSession creates a new session, starts it, and creates a terminal window
+// This is the main entry point for adding sessions (both initial and via IPC)
+func (a *App) AddSession(name string, sshHost string) error {
+	// Create session
+	state, err := a.NewSession(name)
+	if err != nil {
+		return err
+	}
+
+	// Start session
+	if sshHost != "" {
+		err = state.Session().StartSSH(sshHost)
+	} else {
+		err = state.Session().Start()
+	}
+	if err != nil {
+		a.CloseSession(name)
+		return err
+	}
+
+	// Create terminal window in goroutine (Gio windows run their own event loop)
+	go func() {
+		termWin, err := a.CreateTerminalWindow(name)
+		if err != nil {
+			return
+		}
+
+		// Run terminal window event loop
+		termWin.Run()
+
+		// Close session when window closes
+		a.CloseSession(name)
+	}()
+
+	// Invalidate control window to show new session
+	if a.controlWin != nil {
+		a.controlWin.Invalidate()
+	}
+
 	return nil
 }

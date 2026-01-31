@@ -70,7 +70,8 @@ func NewGioRenderer(ops *op.Ops, cols, rows int, fontSize unit.Sp) (*GioRenderer
 		Face: boldItalicFace,
 	})
 
-	shaper := text.NewShaper(text.NoSystemFonts(), text.WithCollection(collection))
+	// Use WithCollection but allow system font fallback for missing glyphs (unicode, etc.)
+	shaper := text.NewShaper(text.WithCollection(collection))
 
 	// Calculate cell size (approximate based on font size)
 	cellH := int(float32(fontSize) * 1.4)

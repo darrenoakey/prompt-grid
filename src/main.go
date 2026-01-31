@@ -3,13 +3,26 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"syscall"
+	"time"
 
 	"gioui.org/app"
 
 	"claude-term/src/gui"
+	"claude-term/src/ipc"
 )
 
+const daemonEnvVar = "CLAUDE_TERM_DAEMON"
+
 func main() {
+	// Check if we're the daemon process
+	if os.Getenv(daemonEnvVar) == "1" {
+		runDaemon()
+		return
+	}
+
+	// Regular invocation - parse args and either connect or spawn daemon
 	args := os.Args[1:]
 
 	if len(args) == 0 {
@@ -37,51 +50,97 @@ func main() {
 		sessionName = args[0]
 	}
 
+	// Try to connect to existing instance
+	req := ipc.Request{
+		SessionName: sessionName,
+		SSHHost:     sshHost,
+	}
+
+	connected, err := ipc.TryConnect(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if connected {
+		// Successfully sent to existing instance - exit immediately
+		os.Exit(0)
+	}
+
+	// No existing instance - spawn daemon and send request
+	spawnDaemon()
+
+	// Wait briefly for daemon to start, then connect
+	for i := 0; i < 50; i++ { // Try for up to 5 seconds
+		connected, err = ipc.TryConnect(req)
+		if connected {
+			os.Exit(0)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	fmt.Fprintln(os.Stderr, "Error: failed to connect to daemon")
+	os.Exit(1)
+}
+
+func spawnDaemon() {
+	// Re-exec ourselves as a detached daemon
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error finding executable: %v\n", err)
+		os.Exit(1)
+	}
+
+	cmd := exec.Command(executable)
+	cmd.Env = append(os.Environ(), daemonEnvVar+"=1")
+
+	// Detach from parent process group
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid: true,
+	}
+
+	// Redirect stdout/stderr to /dev/null
+	devNull, _ := os.Open(os.DevNull)
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+	cmd.Stdin = devNull
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Don't wait - let the daemon run independently
+}
+
+func runDaemon() {
 	// Create application
 	application := gui.NewApp()
 
-	// Create session
-	state, err := application.NewSession(sessionName)
+	// Create IPC server
+	server, err := ipc.NewServer(func(req ipc.Request) error {
+		return application.AddSession(req.SessionName, req.SSHHost)
+	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating session: %v\n", err)
 		os.Exit(1)
 	}
+	defer server.Close()
 
-	// Start session
-	if sshHost != "" {
-		err = state.Session().StartSSH(sshHost)
-	} else {
-		err = state.Session().Start()
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting session: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Create windows
-	go func() {
-		termWin, err := application.CreateTerminalWindow(sessionName)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating terminal window: %v\n", err)
-			return
-		}
-
-		// Run terminal window
-		if err := termWin.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Terminal window error: %v\n", err)
-		}
-
-		// Close session when window closes
-		application.CloseSession(sessionName)
-		os.Exit(0)
-	}()
+	// Run IPC server in background
+	go server.Run()
 
 	// Create and run control window
 	go func() {
 		controlWin := application.CreateControlWindow()
 		if err := controlWin.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Control window error: %v\n", err)
+			// Control window closed
 		}
+		// When control window closes, exit app
+		os.Exit(0)
 	}()
 
 	// Run Gio event loop

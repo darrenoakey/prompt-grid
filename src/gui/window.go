@@ -53,7 +53,7 @@ func NewTerminalWindow(application *App, state *SessionState) *TerminalWindow {
 	)
 
 	// Create shaper with embedded fonts
-	win.shaper = text.NewShaper(text.NoSystemFonts(), text.WithCollection(render.CreateFontCollection()))
+	win.shaper = text.NewShaper(text.WithCollection(render.CreateFontCollection()))
 	win.widget = NewTerminalWidget(state, state.Colors(), application.FontSize(), win.shaper)
 
 	return win

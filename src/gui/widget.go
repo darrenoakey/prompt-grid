@@ -3,11 +3,15 @@ package gui
 import (
 	"image"
 	"image/color"
+	"io"
+	"strings"
 
 	"gioui.org/font"
+	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
+	"gioui.org/io/transfer"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -83,6 +87,8 @@ func (w *TerminalWidget) Layout(gtx layout.Context) layout.Dimensions {
 }
 
 func (w *TerminalWidget) handleInput(gtx layout.Context) {
+	padding := 8
+
 	// Set up clip area for input - this defines the clickable/focusable region
 	areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
 
@@ -91,17 +97,53 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 
 	areaStack.Pop()
 
-	// Process pointer events (for click-to-focus)
+	// Process pointer events for selection
 	for {
 		ev, ok := gtx.Event(
-			pointer.Filter{Target: w, Kinds: pointer.Press},
+			pointer.Filter{Target: w, Kinds: pointer.Press | pointer.Drag | pointer.Release},
 		)
 		if !ok {
 			break
 		}
-		if _, ok := ev.(pointer.Event); ok {
-			// Request focus when clicked
-			w.focused = true
+		if e, ok := ev.(pointer.Event); ok {
+			// Convert pixel position to cell coordinates
+			cellX := (int(e.Position.X) - padding) / w.cellW
+			cellY := (int(e.Position.Y) - padding) / w.cellH
+
+			// Clamp to screen bounds
+			cols, rows := w.state.screen.Size()
+			if cellX < 0 {
+				cellX = 0
+			}
+			if cellX >= cols {
+				cellX = cols - 1
+			}
+			if cellY < 0 {
+				cellY = 0
+			}
+			if cellY >= rows {
+				cellY = rows - 1
+			}
+
+			switch e.Kind {
+			case pointer.Press:
+				w.focused = true
+				w.state.StartSelection(cellX, cellY)
+			case pointer.Drag:
+				w.state.UpdateSelection(cellX, cellY)
+			case pointer.Release:
+				w.state.EndSelection()
+				// Copy selection to clipboard on release
+				if w.state.HasSelection() {
+					selectedText := w.state.GetSelectedText()
+					if len(selectedText) > 0 {
+						gtx.Execute(clipboard.WriteCmd{
+							Type: "text/plain",
+							Data: io.NopCloser(strings.NewReader(selectedText)),
+						})
+					}
+				}
+			}
 		}
 	}
 
@@ -118,24 +160,67 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 		}
 	}
 
-	// Process ALL key events for this window (not filtered by focus)
-	// Terminal should receive keys when the window is active
+	// Process all key events
 	for {
 		ev, ok := gtx.Event(
-			key.Filter{},
+			key.Filter{Optional: key.ModShift | key.ModCtrl | key.ModCommand},
 		)
 		if !ok {
 			break
 		}
-		if e, ok := ev.(key.Event); ok {
+		switch e := ev.(type) {
+		case key.EditEvent:
+			// Clear selection on any text input
+			w.state.ClearSelection()
+			if len(e.Text) > 0 {
+				w.state.session.Write([]byte(e.Text))
+			}
+		case key.Event:
 			if e.State == key.Press {
-				w.handleKey(e)
+				// Handle Cmd+C for copy
+				if e.Modifiers.Contain(key.ModCommand) && e.Name == "C" {
+					if w.state.HasSelection() {
+						selectedText := w.state.GetSelectedText()
+						if len(selectedText) > 0 {
+							gtx.Execute(clipboard.WriteCmd{
+								Type: "text/plain",
+								Data: io.NopCloser(strings.NewReader(selectedText)),
+							})
+						}
+					}
+				} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "V" {
+					// Cmd+V for paste - request clipboard read
+					gtx.Execute(clipboard.ReadCmd{Tag: w})
+				} else {
+					w.state.ClearSelection()
+					w.handleKeyEvent(e)
+				}
+			}
+		}
+	}
+
+	// Process clipboard paste events
+	for {
+		ev, ok := gtx.Event(
+			transfer.TargetFilter{Target: w, Type: "text/plain"},
+		)
+		if !ok {
+			break
+		}
+		if e, ok := ev.(transfer.DataEvent); ok {
+			data := e.Open()
+			if data != nil {
+				content, _ := io.ReadAll(data)
+				data.Close()
+				if len(content) > 0 {
+					w.state.session.Write(content)
+				}
 			}
 		}
 	}
 }
 
-func (w *TerminalWidget) handleKey(e key.Event) {
+func (w *TerminalWidget) handleKeyEvent(e key.Event) {
 	var data []byte
 
 	// Handle special keys
@@ -166,19 +251,29 @@ func (w *TerminalWidget) handleKey(e key.Event) {
 		data = []byte{0x1b, '[', '6', '~'}
 	case key.NameDeleteForward:
 		data = []byte{0x1b, '[', '3', '~'}
+	case key.NameSpace:
+		data = []byte{' '}
 	default:
-		// Regular character input
+		// Handle regular character input
 		if len(e.Name) == 1 {
 			ch := e.Name[0]
 			if e.Modifiers.Contain(key.ModCtrl) {
-				// Ctrl+key
-				if ch >= 'a' && ch <= 'z' {
-					data = []byte{ch - 'a' + 1}
-				} else if ch >= 'A' && ch <= 'Z' {
+				// Ctrl+key: convert to control character
+				if ch >= 'A' && ch <= 'Z' {
 					data = []byte{ch - 'A' + 1}
+				} else if ch >= 'a' && ch <= 'z' {
+					data = []byte{ch - 'a' + 1}
 				}
+			} else if e.Modifiers.Contain(key.ModShift) {
+				// Shift+key: uppercase or shift symbol
+				data = []byte{shiftChar(ch)}
 			} else {
-				data = []byte(e.Name)
+				// Regular key: lowercase
+				if ch >= 'A' && ch <= 'Z' {
+					data = []byte{ch + 32} // Convert to lowercase
+				} else {
+					data = []byte{ch}
+				}
 			}
 		}
 	}
@@ -187,6 +282,7 @@ func (w *TerminalWidget) handleKey(e key.Event) {
 		w.state.session.Write(data)
 	}
 }
+
 
 func (w *TerminalWidget) renderCells(gtx layout.Context) {
 	screen := w.state.screen
@@ -208,33 +304,35 @@ func (w *TerminalWidget) renderCell(gtx layout.Context, th *material.Theme, x, y
 	px := x * w.cellW
 	py := y * w.cellH
 
-	// Draw background if not default
-	if cell.BG.Type != emulator.ColorDefault {
-		bg := cell.BG.ToNRGBA(w.colors.Background)
-		rect := clip.Rect{
-			Min: image.Point{X: px, Y: py},
-			Max: image.Point{X: px + w.cellW, Y: py + w.cellH},
-		}.Op()
-		paint.FillShape(gtx.Ops, bg, rect)
-	}
+	// Check if cell is selected
+	isSelected := w.state.IsSelected(x, y)
 
-	// Skip empty cells
-	if cell.Rune == 0 || cell.Rune == ' ' {
-		return
-	}
-
-	// Get foreground color
+	// Get colors
 	fg := cell.FG.ToNRGBA(w.colors.Foreground)
+	bg := cell.BG.ToNRGBA(w.colors.Background)
 
 	// Handle reverse video
 	if cell.Attrs&emulator.AttrReverse != 0 {
-		bg := cell.BG.ToNRGBA(w.colors.Background)
 		fg, bg = bg, fg
+	}
+
+	// Invert colors for selection
+	if isSelected {
+		fg, bg = bg, fg
+	}
+
+	// Draw background if needed
+	if cell.BG.Type != emulator.ColorDefault || isSelected || cell.Attrs&emulator.AttrReverse != 0 {
 		rect := clip.Rect{
 			Min: image.Point{X: px, Y: py},
 			Max: image.Point{X: px + w.cellW, Y: py + w.cellH},
 		}.Op()
 		paint.FillShape(gtx.Ops, bg, rect)
+	}
+
+	// Skip empty cells (but still draw background for selection)
+	if cell.Rune == 0 || cell.Rune == ' ' {
+		return
 	}
 
 	// Draw the character using material label
