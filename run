@@ -1,0 +1,42 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+OUTPUT="$SCRIPT_DIR/output/claude-term"
+mkdir -p "$SCRIPT_DIR/output"
+
+case "${1:-help}" in
+    build)
+        echo "Building claude-term..."
+        go build -o "$OUTPUT" ./src
+        echo "Build successful: $OUTPUT"
+        ;;
+    test)
+        echo "Running tests..."
+        go test -v ./...
+        ;;
+    dev)
+        echo "Building and running..."
+        go build -o "$OUTPUT" ./src
+        shift || true
+        "$OUTPUT" "$@"
+        ;;
+    verify)
+        echo "Running verification..."
+        go build -o "$OUTPUT" ./src
+        go test -v ./...
+        echo "Verification complete!"
+        ;;
+    help|*)
+        echo "Usage: ./run <command> [args...]"
+        echo ""
+        echo "Commands:"
+        echo "  build       Compile the binary"
+        echo "  test        Run tests"
+        echo "  dev         Build and run in dev mode"
+        echo "  verify      Build and run all tests"
+        echo "  help        Show this help message"
+        ;;
+esac

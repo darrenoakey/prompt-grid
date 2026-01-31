@@ -1,0 +1,36 @@
+# Binary
+claude-term
+
+# Local configuration (contains secrets references)
+local/
+
+# Output logs (but keep the binary)
+output/20*/
+!output/claude-term
+
+# Go build cache
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
