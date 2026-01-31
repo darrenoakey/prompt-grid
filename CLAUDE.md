@@ -59,6 +59,13 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 - Subsequent invocations send session request to primary and exit
 - All sessions managed by single app with one control center
 - `src/ipc/` - IPC server/client for session requests
+- Daemonization: re-exec with `CLAUDE_TERM_DAEMON=1` env var, parent exits immediately
+
+### Gio Event Handling Gotchas
+- Widget state must persist across frames for events to match targets
+- Creating new objects each frame breaks event routing (e.g., tab clicks)
+- Use persistent maps keyed by stable IDs (e.g., session names)
+- `event.Op(gtx.Ops, target)` registers target - target must be same object each frame
 
 ## Testing
 74 tests covering emulator, PTY, rendering, GUI app logic.
