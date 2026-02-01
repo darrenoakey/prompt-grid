@@ -24,12 +24,13 @@ const tabWidth = 200
 
 // ControlWindow is the control center showing all sessions
 type ControlWindow struct {
-	app        *App
-	window     *app.Window
-	shaper     *text.Shaper
-	ops        op.Ops
-	selected   string
-	tabStates  map[string]*tabState // Persistent tab states keyed by name
+	app         *App
+	window      *app.Window
+	shaper      *text.Shaper
+	ops         op.Ops
+	selected    string
+	tabStates   map[string]*tabState // Persistent tab states keyed by name
+	contextMenu *contextMenuState    // Right-click context menu
 }
 
 type tabState struct {
@@ -38,12 +39,26 @@ type tabState struct {
 	pressed bool
 }
 
+type contextMenuState struct {
+	visible     bool
+	sessionName string
+	position    image.Point
+	items       []*menuItem
+}
+
+type menuItem struct {
+	label   string
+	action  func()
+	hovered bool
+}
+
 // NewControlWindow creates the control center window
 func NewControlWindow(application *App) *ControlWindow {
 	win := &ControlWindow{
-		app:       application,
-		window:    new(app.Window),
-		tabStates: make(map[string]*tabState),
+		app:         application,
+		window:      new(app.Window),
+		tabStates:   make(map[string]*tabState),
+		contextMenu: &contextMenuState{},
 	}
 
 	win.window.Option(
@@ -98,6 +113,31 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		w.selected = sessions[0]
 	}
 
+	// Handle clicks outside context menu to dismiss it
+	if w.contextMenu.visible {
+		areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
+		event.Op(gtx.Ops, w.contextMenu)
+		for {
+			ev, ok := gtx.Event(
+				pointer.Filter{Target: w.contextMenu, Kinds: pointer.Press},
+			)
+			if !ok {
+				break
+			}
+			if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
+				// Check if click is outside the menu
+				menuWidth := 140
+				menuHeight := len(w.contextMenu.items) * 28
+				pos := w.contextMenu.position
+				clickX, clickY := int(e.Position.X), int(e.Position.Y)
+				if clickX < pos.X || clickX > pos.X+menuWidth || clickY < pos.Y || clickY > pos.Y+menuHeight {
+					w.contextMenu.visible = false
+				}
+			}
+		}
+		areaStack.Pop()
+	}
+
 	// Split layout: tabs | separator | terminal
 	layout.Flex{}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -110,6 +150,9 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 			return w.layoutTerminal(gtx)
 		}),
 	)
+
+	// Draw context menu on top of everything
+	w.layoutContextMenu(gtx)
 }
 
 func (w *ControlWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
@@ -131,7 +174,7 @@ func (w *ControlWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
 			continue
 		}
 		stack := op.Offset(image.Pt(0, offsetY)).Push(gtx.Ops)
-		d := w.layoutTab(gtx, tab)
+		d := w.layoutTab(gtx, tab, offsetY)
 		stack.Pop()
 		offsetY += d.Size.Y
 	}
@@ -193,7 +236,7 @@ func (w *ControlWindow) layoutDiscordStatus(gtx layout.Context, height int) {
 	textStack.Pop()
 }
 
-func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState) layout.Dimensions {
+func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int) layout.Dimensions {
 	height := 40
 
 	// Get session colors for this tab - use exact session colors
@@ -226,7 +269,17 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState) layout.Dime
 			case pointer.Leave:
 				tab.hovered = false
 			case pointer.Press:
-				w.selected = tab.name
+				// Check for right-click (secondary button or control+click on macOS)
+				isRightClick := e.Buttons.Contain(pointer.ButtonSecondary) ||
+					(e.Modifiers.Contain(key.ModCtrl) && e.Buttons.Contain(pointer.ButtonPrimary))
+				if isRightClick {
+					// Right-click - show context menu
+					w.showContextMenu(tab.name, image.Point{X: int(e.Position.X), Y: offsetY + int(e.Position.Y)})
+				} else {
+					// Left-click - select tab
+					w.selected = tab.name
+					w.contextMenu.visible = false // Close context menu on left click
+				}
 			}
 		}
 	}
@@ -413,6 +466,137 @@ func shiftChar(ch byte) byte {
 		return shifted
 	}
 	return ch
+}
+
+func (w *ControlWindow) showContextMenu(sessionName string, pos image.Point) {
+	w.contextMenu.visible = true
+	w.contextMenu.sessionName = sessionName
+	w.contextMenu.position = pos
+	w.contextMenu.items = []*menuItem{
+		{
+			label: "Bring to Front",
+			action: func() {
+				w.contextMenu.visible = false
+				w.window.Invalidate() // Immediately redraw without menu
+				// Run async to avoid blocking the event loop
+				go func() {
+					if state := w.app.GetSession(sessionName); state != nil && state.window != nil {
+						state.window.BringToFront()
+					}
+				}()
+			},
+		},
+		{
+			label: "Close",
+			action: func() {
+				w.contextMenu.visible = false
+				w.window.Invalidate() // Immediately redraw without menu
+				// Run async to avoid blocking
+				go w.app.CloseSession(sessionName)
+			},
+		},
+	}
+}
+
+func (w *ControlWindow) layoutContextMenu(gtx layout.Context) {
+	if !w.contextMenu.visible {
+		return
+	}
+
+	itemHeight := 28
+	menuWidth := 140
+	menuHeight := len(w.contextMenu.items) * itemHeight
+
+	// Menu position
+	pos := w.contextMenu.position
+
+	// Draw menu background with shadow
+	shadowRect := clip.Rect{
+		Min: image.Point{X: pos.X + 2, Y: pos.Y + 2},
+		Max: image.Point{X: pos.X + menuWidth + 2, Y: pos.Y + menuHeight + 2},
+	}.Op()
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 0, G: 0, B: 0, A: 80}, shadowRect)
+
+	// Menu background
+	menuRect := clip.Rect{
+		Min: pos,
+		Max: image.Point{X: pos.X + menuWidth, Y: pos.Y + menuHeight},
+	}.Op()
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 45, G: 45, B: 50, A: 255}, menuRect)
+
+	// Border
+	for _, edge := range []clip.Rect{
+		{Min: pos, Max: image.Point{X: pos.X + menuWidth, Y: pos.Y + 1}},                                   // top
+		{Min: image.Point{X: pos.X, Y: pos.Y + menuHeight - 1}, Max: image.Point{X: pos.X + menuWidth, Y: pos.Y + menuHeight}}, // bottom
+		{Min: pos, Max: image.Point{X: pos.X + 1, Y: pos.Y + menuHeight}},                                   // left
+		{Min: image.Point{X: pos.X + menuWidth - 1, Y: pos.Y}, Max: image.Point{X: pos.X + menuWidth, Y: pos.Y + menuHeight}}, // right
+	} {
+		paint.FillShape(gtx.Ops, color.NRGBA{R: 80, G: 80, B: 90, A: 255}, edge.Op())
+	}
+
+	// Draw menu items
+	for i, item := range w.contextMenu.items {
+		itemY := pos.Y + i*itemHeight
+		itemRect := clip.Rect{
+			Min: image.Point{X: pos.X + 1, Y: itemY + 1},
+			Max: image.Point{X: pos.X + menuWidth - 1, Y: itemY + itemHeight},
+		}
+
+		// Handle item input
+		itemStack := itemRect.Push(gtx.Ops)
+		event.Op(gtx.Ops, item)
+
+		for {
+			ev, ok := gtx.Event(
+				pointer.Filter{Target: item, Kinds: pointer.Press | pointer.Enter | pointer.Leave},
+			)
+			if !ok {
+				break
+			}
+			switch e := ev.(type) {
+			case pointer.Event:
+				switch e.Kind {
+				case pointer.Enter:
+					item.hovered = true
+				case pointer.Leave:
+					item.hovered = false
+				case pointer.Press:
+					if item.action != nil {
+						item.action()
+					}
+				}
+			}
+		}
+		itemStack.Pop()
+
+		// Draw hover highlight
+		if item.hovered {
+			hoverRect := clip.Rect{
+				Min: image.Point{X: pos.X + 2, Y: itemY + 1},
+				Max: image.Point{X: pos.X + menuWidth - 2, Y: itemY + itemHeight - 1},
+			}.Op()
+			paint.FillShape(gtx.Ops, color.NRGBA{R: 80, G: 120, B: 200, A: 255}, hoverRect)
+		}
+
+		// Draw item label
+		th := material.NewTheme()
+		th.Shaper = w.shaper
+		label := material.Label(th, unit.Sp(13), item.label)
+		if item.hovered {
+			label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+		} else {
+			label.Color = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
+		}
+
+		labelStack := op.Offset(image.Pt(pos.X+12, itemY+6)).Push(gtx.Ops)
+		labelGtx := gtx
+		labelGtx.Constraints = layout.Constraints{
+			Min: image.Point{},
+			Max: image.Point{X: menuWidth - 24, Y: itemHeight},
+		}
+		label.Layout(labelGtx)
+		labelStack.Pop()
+	}
 }
 
 // Close closes the control window

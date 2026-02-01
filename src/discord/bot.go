@@ -155,9 +155,6 @@ func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
 
 	// Register slash commands
 	b.registerCommands()
-
-	// Send startup notification
-	b.sendStartupNotification()
 }
 
 func (b *Bot) handleDisconnect(s *discordgo.Session, d *discordgo.Disconnect) {
@@ -216,20 +213,6 @@ func (b *Bot) reconnect() {
 
 		discordLog.Printf("Reconnected successfully")
 		return
-	}
-}
-
-func (b *Bot) sendStartupNotification() {
-	if b.cfg.ChannelID == "" {
-		return
-	}
-
-	hostname, _ := os.Hostname()
-	msg := fmt.Sprintf("**Claude-Term** started on `%s`\nUse `/term list` to see sessions, `/term help` for commands.", hostname)
-
-	_, err := b.session.ChannelMessageSend(b.cfg.ChannelID, msg)
-	if err != nil {
-		fmt.Printf("Failed to send startup notification: %v\n", err)
 	}
 }
 

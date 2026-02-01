@@ -107,6 +107,11 @@ func (w *TerminalWindow) Close() {
 	w.window.Perform(system.ActionClose)
 }
 
+// BringToFront raises the window to the front
+func (w *TerminalWindow) BringToFront() {
+	w.window.Perform(system.ActionRaise)
+}
+
 // Invalidate requests a redraw
 func (w *TerminalWindow) Invalidate() {
 	w.window.Invalidate()
