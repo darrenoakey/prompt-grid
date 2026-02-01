@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"strings"
 	"sync"
 
 	"gioui.org/app"
@@ -11,6 +12,11 @@ import (
 	"claude-term/src/render"
 )
 
+// DiscordStatus provides Discord connection status
+type DiscordStatus interface {
+	IsConnected() bool
+}
+
 // App coordinates the entire application
 type App struct {
 	manager    *pty.Manager
@@ -19,6 +25,7 @@ type App struct {
 	colors     render.DefaultColors
 	fontSize   unit.Sp
 	controlWin *ControlWindow
+	discordBot DiscordStatus
 }
 
 // SelectionPoint represents a position in the terminal
@@ -230,11 +237,24 @@ func (a *App) NewSession(name string) (*SessionState, error) {
 	return state, nil
 }
 
-// GetSession returns session state by name
+// GetSession returns session state by name (case-insensitive)
 func (a *App) GetSession(name string) *SessionState {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.sessions[name]
+
+	// Try exact match first
+	if state, ok := a.sessions[name]; ok {
+		return state
+	}
+
+	// Try case-insensitive match
+	nameLower := strings.ToLower(name)
+	for k, state := range a.sessions {
+		if strings.ToLower(k) == nameLower {
+			return state
+		}
+	}
+	return nil
 }
 
 // ListSessions returns all session names
@@ -242,18 +262,29 @@ func (a *App) ListSessions() []string {
 	return a.manager.List()
 }
 
-// CloseSession closes a session
+// CloseSession closes a session (case-insensitive)
 func (a *App) CloseSession(name string) error {
 	a.mu.Lock()
-	state := a.sessions[name]
-	delete(a.sessions, name)
+
+	// Find the actual key (case-insensitive)
+	actualName := name
+	nameLower := strings.ToLower(name)
+	for k := range a.sessions {
+		if strings.ToLower(k) == nameLower {
+			actualName = k
+			break
+		}
+	}
+
+	state := a.sessions[actualName]
+	delete(a.sessions, actualName)
 	a.mu.Unlock()
 
 	if state != nil && state.window != nil {
 		state.window.Close()
 	}
 
-	return a.manager.Close(name)
+	return a.manager.Close(actualName)
 }
 
 // invalidateSession signals windows to redraw for a session
@@ -296,6 +327,23 @@ func (a *App) CreateControlWindow() *ControlWindow {
 func (a *App) Run() error {
 	app.Main()
 	return nil
+}
+
+// SetDiscordBot sets the Discord bot reference for status display
+func (a *App) SetDiscordBot(bot DiscordStatus) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.discordBot = bot
+}
+
+// IsDiscordConnected returns whether Discord is connected
+func (a *App) IsDiscordConnected() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.discordBot == nil {
+		return false
+	}
+	return a.discordBot.IsConnected()
 }
 
 // AddSession creates a new session, starts it, and creates a terminal window

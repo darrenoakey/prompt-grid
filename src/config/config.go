@@ -18,14 +18,42 @@ type DiscordConfig struct {
 	AuthorizedUsers []string `json:"authorized_users"`
 }
 
-// DefaultConfigPath returns the default config file path
-func DefaultConfigPath() string {
-	// Look in local/ directory relative to executable
-	exe, err := os.Executable()
-	if err != nil {
-		return "local/config.json"
+// configSearchPaths returns paths to search for config, in order of priority
+func configSearchPaths() []string {
+	paths := []string{}
+
+	// First: ~/.config/claude-term/config.json (standard user config location)
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".config", "claude-term", "config.json"))
 	}
-	return filepath.Join(filepath.Dir(exe), "local", "config.json")
+
+	// Second: local/ directory relative to executable (for development)
+	if exe, err := os.Executable(); err == nil {
+		paths = append(paths, filepath.Join(filepath.Dir(exe), "local", "config.json"))
+	}
+
+	// Third: current directory
+	paths = append(paths, "local/config.json")
+
+	return paths
+}
+
+// DefaultConfigPath returns the first config path that exists, or the preferred path if none exist
+func DefaultConfigPath() string {
+	paths := configSearchPaths()
+
+	// Return first path that exists
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+
+	// No config exists, return preferred location for creation
+	if len(paths) > 0 {
+		return paths[0]
+	}
+	return "local/config.json"
 }
 
 // Load loads configuration from a file

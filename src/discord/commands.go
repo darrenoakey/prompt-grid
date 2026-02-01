@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
+	"claude-term/src/gui"
 	"claude-term/src/render"
 )
 
@@ -33,18 +35,23 @@ func (h *CommandHandler) respond(content string, ephemeral bool) {
 		flags = discordgo.MessageFlagsEphemeral
 	}
 
-	h.session.InteractionRespond(h.interaction.Interaction, &discordgo.InteractionResponse{
+	err := h.session.InteractionRespond(h.interaction.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Content: content,
 			Flags:   flags,
 		},
 	})
+	if err != nil {
+		discordLog.Printf("Failed to respond: %v", err)
+	} else {
+		discordLog.Printf("Responded with: %s", content)
+	}
 }
 
 // respondWithFile sends a response with a file attachment
 func (h *CommandHandler) respondWithFile(filename string, data []byte, content string) {
-	h.session.InteractionRespond(h.interaction.Interaction, &discordgo.InteractionResponse{
+	err := h.session.InteractionRespond(h.interaction.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Content: content,
@@ -57,6 +64,42 @@ func (h *CommandHandler) respondWithFile(filename string, data []byte, content s
 			},
 		},
 	})
+	if err != nil {
+		discordLog.Printf("Failed to respond with file: %v", err)
+	} else {
+		discordLog.Printf("Responded with file: %s (%d bytes)", filename, len(data))
+	}
+}
+
+// followUp sends a follow-up message after a deferred response
+func (h *CommandHandler) followUp(content string) {
+	_, err := h.session.FollowupMessageCreate(h.interaction.Interaction, true, &discordgo.WebhookParams{
+		Content: content,
+	})
+	if err != nil {
+		discordLog.Printf("Failed to follow up: %v", err)
+	} else {
+		discordLog.Printf("Followed up with: %s", content)
+	}
+}
+
+// followUpWithFile sends a follow-up message with a file after a deferred response
+func (h *CommandHandler) followUpWithFile(filename string, data []byte, content string) {
+	_, err := h.session.FollowupMessageCreate(h.interaction.Interaction, true, &discordgo.WebhookParams{
+		Content: content,
+		Files: []*discordgo.File{
+			{
+				Name:        filename,
+				ContentType: "image/png",
+				Reader:      bytes.NewReader(data),
+			},
+		},
+	})
+	if err != nil {
+		discordLog.Printf("Failed to follow up with file: %v", err)
+	} else {
+		discordLog.Printf("Followed up with file: %s (%d bytes)", filename, len(data))
+	}
 }
 
 // getOption finds an option by name
@@ -148,7 +191,96 @@ func (h *CommandHandler) HandleRun(options []*discordgo.ApplicationCommandIntera
 		return
 	}
 
-	h.respond(fmt.Sprintf("Sent to **%s**: `%s`", name, cmd), false)
+	// Try quick wait first (1 second)
+	screenshot := h.waitForStableOutput(state, 1*time.Second)
+	if screenshot != nil {
+		// Got stable output quickly - respond directly
+		h.respondWithFile(fmt.Sprintf("%s.png", name), screenshot, fmt.Sprintf("**%s** → `%s`", name, cmd))
+		return
+	}
+
+	// Need more time - use deferred response
+	h.session.InteractionRespond(h.interaction.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
+
+	// Wait longer for output to stabilize
+	screenshot = h.waitForStableOutput(state, 10*time.Second)
+	if screenshot == nil {
+		h.followUp(fmt.Sprintf("Sent `%s` but failed to capture output", cmd))
+		return
+	}
+
+	h.followUpWithFile(fmt.Sprintf("%s.png", name), screenshot, fmt.Sprintf("**%s** → `%s`", name, cmd))
+}
+
+// waitForStableOutput waits until screen output stabilizes or timeout
+// It first waits for the screen to change (command started), then waits for it to stabilize
+func (h *CommandHandler) waitForStableOutput(state *gui.SessionState, timeout time.Duration) []byte {
+	screen := state.Screen()
+	cols, rows := screen.Size()
+	colors := h.bot.App().Colors()
+
+	takeScreenshot := func() []byte {
+		renderer, err := render.NewImageRenderer(cols, rows, 14)
+		if err != nil {
+			return nil
+		}
+		render.RenderScreen(renderer, screen, colors)
+		var buf bytes.Buffer
+		if err := renderer.WritePNG(&buf); err != nil {
+			return nil
+		}
+		return buf.Bytes()
+	}
+
+	// Take initial screenshot before command output appears
+	initialScreenshot := takeScreenshot()
+	if initialScreenshot == nil {
+		return nil
+	}
+
+	deadline := time.Now().Add(timeout)
+	var lastScreenshot []byte
+	stableCount := 0
+	hasChanged := false
+
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+
+		currentScreenshot := takeScreenshot()
+		if currentScreenshot == nil {
+			continue
+		}
+
+		// First, wait for screen to change (command started producing output)
+		if !hasChanged {
+			if !bytes.Equal(currentScreenshot, initialScreenshot) {
+				hasChanged = true
+				lastScreenshot = currentScreenshot
+				stableCount = 0
+			}
+			continue
+		}
+
+		// Now wait for screen to stabilize
+		if bytes.Equal(currentScreenshot, lastScreenshot) {
+			stableCount++
+			// Consider stable after 4 consecutive unchanged checks (200ms)
+			if stableCount >= 4 {
+				return currentScreenshot
+			}
+		} else {
+			stableCount = 0
+			lastScreenshot = currentScreenshot
+		}
+	}
+
+	// Timeout - return last screenshot if we have one
+	if lastScreenshot != nil {
+		return lastScreenshot
+	}
+	return initialScreenshot
 }
 
 // HandleConnect handles the /term connect command
@@ -227,4 +359,34 @@ func (h *CommandHandler) HandleClose(options []*discordgo.ApplicationCommandInte
 	}
 
 	h.respond(fmt.Sprintf("Closed session **%s**.", name), false)
+}
+
+// HandleNew handles the /term new command
+func (h *CommandHandler) HandleNew(options []*discordgo.ApplicationCommandInteractionDataOption) {
+	name := getOption(options, "name")
+	if name == "" {
+		h.respond("Session name is required.", true)
+		return
+	}
+
+	sshHost := getOption(options, "ssh")
+
+	// Check if session already exists
+	if h.bot.App().GetSession(name) != nil {
+		h.respond(fmt.Sprintf("Session **%s** already exists.", name), true)
+		return
+	}
+
+	// Create the session
+	err := h.bot.App().AddSession(name, sshHost)
+	if err != nil {
+		h.respond(fmt.Sprintf("Failed to create session: %v", err), true)
+		return
+	}
+
+	if sshHost != "" {
+		h.respond(fmt.Sprintf("Created SSH session **%s** → `%s`", name, sshHost), false)
+	} else {
+		h.respond(fmt.Sprintf("Created session **%s**", name), false)
+	}
 }

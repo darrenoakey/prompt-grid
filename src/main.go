@@ -9,6 +9,8 @@ import (
 
 	"gioui.org/app"
 
+	"claude-term/src/config"
+	"claude-term/src/discord"
 	"claude-term/src/gui"
 	"claude-term/src/ipc"
 )
@@ -133,17 +135,43 @@ func runDaemon() {
 	// Run IPC server in background
 	go server.Run()
 
-	// Create and run control window
+	// Initialize Discord bot
+	var bot *discord.Bot
+	cfg, cfgErr := config.LoadDefault()
+	if cfgErr == nil {
+		bot, err = discord.NewBot(&cfg.Discord, application)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Discord bot creation failed: %v\n", err)
+		} else {
+			if err := bot.Connect(); err != nil {
+				fmt.Fprintf(os.Stderr, "Discord connection failed: %v\n", err)
+				bot = nil
+			}
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Config not loaded: %v\n", cfgErr)
+	}
+
+	// Ensure bot cleanup on exit
+	if bot != nil {
+		defer bot.Disconnect()
+	}
+
+	// Set bot reference in app for status display
+	application.SetDiscordBot(bot)
+
+	// Create and run control window in background
+	// The daemon stays running even if control window is closed
 	go func() {
 		controlWin := application.CreateControlWindow()
 		if err := controlWin.Run(); err != nil {
-			// Control window closed
+			// Control window closed - that's fine, daemon keeps running
 		}
-		// When control window closes, exit app
-		os.Exit(0)
+		// Control window closed - daemon continues for Discord bot
+		// User can reopen control via IPC or Discord commands
 	}()
 
-	// Run Gio event loop
+	// Run Gio event loop - this keeps the daemon alive
 	app.Main()
 }
 

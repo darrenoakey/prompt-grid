@@ -116,14 +116,14 @@ func (w *ControlWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
 	// Fixed width for tabs panel
 	gtx.Constraints.Max.X = tabWidth
 	gtx.Constraints.Min.X = tabWidth
+	panelHeight := gtx.Constraints.Max.Y
 
 	// Background
-	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: gtx.Constraints.Max.Y}}.Op()
+	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: panelHeight}}.Op()
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 40, G: 40, B: 40, A: 255}, rect)
 
 	// Layout tabs vertically
 	sessions := w.app.ListSessions()
-	var dims layout.Dimensions
 	offsetY := 0
 	for _, name := range sessions {
 		tab := w.tabStates[name]
@@ -134,11 +134,63 @@ func (w *ControlWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
 		d := w.layoutTab(gtx, tab)
 		stack.Pop()
 		offsetY += d.Size.Y
-		dims.Size.Y = offsetY
 	}
-	dims.Size.X = tabWidth
 
-	return dims
+	// Layout Discord status at bottom
+	statusHeight := 30
+	statusY := panelHeight - statusHeight
+	statusStack := op.Offset(image.Pt(0, statusY)).Push(gtx.Ops)
+	w.layoutDiscordStatus(gtx, statusHeight)
+	statusStack.Pop()
+
+	return layout.Dimensions{Size: image.Point{X: tabWidth, Y: panelHeight}}
+}
+
+func (w *ControlWindow) layoutDiscordStatus(gtx layout.Context, height int) {
+	// Background slightly lighter than sidebar
+	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 50, G: 50, B: 50, A: 255}, rect)
+
+	// Separator line at top
+	sepRect := clip.Rect{Max: image.Point{X: tabWidth, Y: 1}}.Op()
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 70, G: 70, B: 70, A: 255}, sepRect)
+
+	// Status indicator circle
+	circleX := 12
+	circleY := height / 2
+	circleRadius := 5
+
+	var statusColor color.NRGBA
+	var statusText string
+	if w.app.IsDiscordConnected() {
+		statusColor = color.NRGBA{R: 80, G: 200, B: 80, A: 255} // Green
+		statusText = "Discord connected"
+	} else {
+		statusColor = color.NRGBA{R: 200, G: 80, B: 80, A: 255} // Red
+		statusText = "Discord offline"
+	}
+
+	// Draw circle (approximate with small rect for simplicity)
+	circleRect := clip.Rect{
+		Min: image.Point{X: circleX - circleRadius, Y: circleY - circleRadius},
+		Max: image.Point{X: circleX + circleRadius, Y: circleY + circleRadius},
+	}.Op()
+	paint.FillShape(gtx.Ops, statusColor, circleRect)
+
+	// Status text
+	th := material.NewTheme()
+	th.Shaper = w.shaper
+	label := material.Label(th, unit.Sp(11), statusText)
+	label.Color = color.NRGBA{R: 160, G: 160, B: 160, A: 255}
+
+	textStack := op.Offset(image.Pt(circleX+circleRadius+8, 8)).Push(gtx.Ops)
+	labelGtx := gtx
+	labelGtx.Constraints = layout.Constraints{
+		Min: image.Point{X: 0, Y: 0},
+		Max: image.Point{X: tabWidth - 30, Y: height},
+	}
+	label.Layout(labelGtx)
+	textStack.Pop()
 }
 
 func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState) layout.Dimensions {
