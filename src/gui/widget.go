@@ -173,7 +173,7 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 			// Clear selection on any text input
 			w.state.ClearSelection()
 			if len(e.Text) > 0 {
-				w.state.session.Write([]byte(e.Text))
+				w.state.client.Write([]byte(e.Text))
 			}
 		case key.Event:
 			if e.State == key.Press {
@@ -213,7 +213,7 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 				content, _ := io.ReadAll(data)
 				data.Close()
 				if len(content) > 0 {
-					w.state.session.Write(content)
+					w.state.client.Write(content)
 				}
 			}
 		}
@@ -279,10 +279,9 @@ func (w *TerminalWidget) handleKeyEvent(e key.Event) {
 	}
 
 	if len(data) > 0 {
-		w.state.session.Write(data)
+		w.state.client.Write(data)
 	}
 }
-
 
 func (w *TerminalWidget) renderCells(gtx layout.Context) {
 	screen := w.state.screen

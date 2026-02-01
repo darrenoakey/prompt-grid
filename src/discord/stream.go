@@ -78,7 +78,7 @@ func (s *Streamer) Stop() {
 
 // SessionName returns the name of the streamed session
 func (s *Streamer) SessionName() string {
-	return s.state.Session().Name()
+	return s.state.Client().Name()
 }
 
 // pollLoop periodically checks for screen changes
@@ -175,10 +175,10 @@ func (s *Streamer) sendScreenshot() {
 
 	// Send to Discord
 	s.bot.Session().ChannelMessageSendComplex(s.bot.ChannelID(), &discordgo.MessageSend{
-		Content: fmt.Sprintf("**%s** screenshot", s.state.Session().Name()),
+		Content: fmt.Sprintf("**%s** screenshot", s.state.Client().Name()),
 		Files: []*discordgo.File{
 			{
-				Name:        fmt.Sprintf("%s.png", s.state.Session().Name()),
+				Name:        fmt.Sprintf("%s.png", s.state.Client().Name()),
 				ContentType: "image/png",
 				Reader:      bytes.NewReader(s.lastScreenshot),
 			},

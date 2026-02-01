@@ -13,13 +13,51 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 ## Key Architecture
 
 ### Package Structure
-- `src/pty/` - PTY session management, SSH support
+- `src/session/` - Session daemon (PTY owner), client, protocol
+- `src/pty/` - PTY session management, SSH support (used by session daemon)
 - `src/emulator/` - ANSI parser, screen buffer, scrollback
 - `src/render/` - Renderer interface, Gio renderer, image renderer for PNG
 - `src/gui/` - Gio windows, widgets, control center
 - `src/discord/` - Bot, slash commands, screenshot streaming
 - `src/config/` - Config loading, keyring access
 - `src/logging/` - JSONL logging with dated directories
+- `src/ipc/` - IPC server/client for session requests
+
+### Session Daemon Architecture (Survives Restart)
+Each terminal session runs in its own daemon process:
+- **Main process**: GUI, Discord bot, IPC server
+- **Session daemons**: One per terminal, owns the PTY
+
+```
+Main Process (GUI/Discord/IPC)
+    │
+    ├── connects to ──► Session Daemon "Work" (PTY owner)
+    │                   └── /tmp/claude-term-sessions/Work.sock
+    │
+    └── connects to ──► Session Daemon "Server" (PTY owner)
+                        └── /tmp/claude-term-sessions/Server.sock
+```
+
+Key behaviors:
+- Session daemons survive main process restart
+- On startup, main process discovers existing daemons and reconnects
+- Socket files in `/tmp/claude-term-sessions/`
+- Info files (`.json`) store PID and start time for validation
+- History buffer (256KB) replayed on reconnect for screen reconstruction
+- `session.Client` replaces direct PTY access in GUI code
+- Close session = terminate daemon; close window = disconnect (daemon survives)
+
+Protocol (`src/session/protocol.go`):
+- `MsgData` (0x01): PTY data bidirectional
+- `MsgResize` (0x02): Terminal resize
+- `MsgInfo` (0x03/0x04): Session metadata
+- `MsgHistory` (0x05): History replay complete marker
+- `MsgClose` (0x06): Terminate session
+
+Stale session detection:
+- Check info file PID still running
+- Verify process start time matches
+- Try socket connection with timeout
 
 ### Gio GUI Notes
 - Use `new(app.Window)` then `win.Option()` separately (not `app.NewWindow()`)
@@ -58,8 +96,8 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 - First instance becomes primary, listens on socket
 - Subsequent invocations send session request to primary and exit
 - All sessions managed by single app with one control center
-- `src/ipc/` - IPC server/client for session requests
 - Daemonization: re-exec with `CLAUDE_TERM_DAEMON=1` env var, parent exits immediately
+- Session daemons spawned with `--session-daemon` flag (internal)
 
 ### Gio Event Handling Gotchas
 - Widget state must persist across frames for events to match targets
@@ -78,4 +116,4 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 - Logs to `~/.config/claude-term/discord.log`
 
 ## Testing
-74 tests covering emulator, PTY, rendering, GUI app logic.
+90 tests covering emulator, PTY, rendering, session daemon, GUI app logic.

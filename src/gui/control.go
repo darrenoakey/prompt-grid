@@ -379,7 +379,7 @@ func (w *ControlWindow) handleTerminalInput(gtx layout.Context, state *SessionSt
 		switch e := ev.(type) {
 		case key.EditEvent:
 			if len(e.Text) > 0 {
-				state.session.Write([]byte(e.Text))
+				state.client.Write([]byte(e.Text))
 			}
 		case key.Event:
 			if e.State == key.Press {
@@ -444,7 +444,7 @@ func (w *ControlWindow) handleKeyEvent(state *SessionState, e key.Event) {
 	}
 
 	if len(data) > 0 {
-		state.session.Write(data)
+		state.client.Write(data)
 	}
 }
 

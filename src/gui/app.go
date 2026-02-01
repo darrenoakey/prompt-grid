@@ -1,6 +1,9 @@
 package gui
 
 import (
+	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -8,9 +11,12 @@ import (
 	"gioui.org/unit"
 
 	"claude-term/src/emulator"
-	"claude-term/src/pty"
 	"claude-term/src/render"
+	"claude-term/src/session"
 )
+
+// ErrSessionNotFound is returned when a session is not found
+var ErrSessionNotFound = errors.New("session not found")
 
 // DiscordStatus provides Discord connection status
 type DiscordStatus interface {
@@ -19,7 +25,6 @@ type DiscordStatus interface {
 
 // App coordinates the entire application
 type App struct {
-	manager    *pty.Manager
 	sessions   map[string]*SessionState
 	mu         sync.RWMutex
 	colors     render.DefaultColors
@@ -35,7 +40,7 @@ type SelectionPoint struct {
 
 // SessionState holds state for a single session
 type SessionState struct {
-	session    *pty.Session
+	client     *session.Client
 	parser     *emulator.Parser
 	screen     *emulator.Screen
 	scrollback *emulator.Scrollback
@@ -43,15 +48,15 @@ type SessionState struct {
 	colors     render.SessionColor // Unique color for this session
 
 	// Selection state
-	selStart    SelectionPoint
-	selEnd      SelectionPoint
-	selecting   bool // Mouse is currently being dragged
+	selStart     SelectionPoint
+	selEnd       SelectionPoint
+	selecting    bool // Mouse is currently being dragged
 	hasSelection bool // There is an active selection
 }
 
-// Session returns the PTY session
-func (s *SessionState) Session() *pty.Session {
-	return s.session
+// Client returns the session client
+func (s *SessionState) Client() *session.Client {
+	return s.client
 }
 
 // Screen returns the screen buffer
@@ -180,17 +185,79 @@ func (s *SessionState) GetSelectedText() string {
 
 // NewApp creates a new application
 func NewApp() *App {
-	return &App{
-		manager:  pty.NewManager(),
+	a := &App{
 		sessions: make(map[string]*SessionState),
 		colors:   render.DefaultColorScheme(),
 		fontSize: 14,
 	}
+
+	// Discover and reconnect to existing session daemons
+	a.discoverSessions()
+
+	return a
 }
 
-// Manager returns the session manager
-func (a *App) Manager() *pty.Manager {
-	return a.manager
+// discoverSessions finds and reconnects to existing session daemons
+func (a *App) discoverSessions() {
+	names := session.ListSessions()
+	for _, name := range names {
+		a.reconnectSession(name)
+	}
+}
+
+// reconnectSession connects to an existing session daemon
+func (a *App) reconnectSession(name string) error {
+	client, err := session.Connect(name)
+	if err != nil {
+		return err
+	}
+
+	// Create emulator components
+	info := client.Info()
+	screen := emulator.NewScreen(int(info.Cols), int(info.Rows))
+	scrollback := emulator.NewScrollback()
+	parser := emulator.NewParser(screen, scrollback)
+
+	state := &SessionState{
+		client:     client,
+		parser:     parser,
+		screen:     screen,
+		scrollback: scrollback,
+		colors:     render.RandomSessionColor(),
+	}
+
+	// Connect client data to parser
+	client.SetOnData(func(data []byte) {
+		parser.Parse(data)
+		a.invalidateSession(name)
+	})
+
+	client.SetOnExit(func(err error) {
+		a.mu.Lock()
+		delete(a.sessions, name)
+		a.mu.Unlock()
+		if a.controlWin != nil {
+			a.controlWin.Invalidate()
+		}
+	})
+
+	client.Start()
+
+	a.mu.Lock()
+	a.sessions[name] = state
+	a.mu.Unlock()
+
+	// Create terminal window
+	go func() {
+		termWin, err := a.CreateTerminalWindow(name)
+		if err != nil {
+			return
+		}
+		termWin.Run()
+		a.CloseSession(name)
+	}()
+
+	return nil
 }
 
 // Colors returns the current color scheme
@@ -203,37 +270,62 @@ func (a *App) FontSize() unit.Sp {
 	return a.fontSize
 }
 
-// NewSession creates a new session with associated GUI state
-func (a *App) NewSession(name string) (*SessionState, error) {
+// NewSession creates a new session by spawning a daemon and connecting
+func (a *App) NewSession(name string, sshHost string) (*SessionState, error) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	if _, exists := a.sessions[name]; exists {
+		a.mu.Unlock()
+		return nil, fmt.Errorf("session %q already exists", name)
+	}
+	a.mu.Unlock()
 
-	session, err := a.manager.NewSession(name)
+	// Spawn session daemon
+	cols := uint16(120)
+	rows := uint16(24)
+	if err := session.SpawnDaemon(name, cols, rows, sshHost); err != nil {
+		return nil, err
+	}
+
+	// Connect to daemon
+	client, err := session.Connect(name)
 	if err != nil {
 		return nil, err
 	}
 
 	// Create emulator components
-	screen := emulator.NewScreen(120, 24)
+	screen := emulator.NewScreen(int(cols), int(rows))
 	scrollback := emulator.NewScrollback()
 	parser := emulator.NewParser(screen, scrollback)
 
 	state := &SessionState{
-		session:    session,
+		client:     client,
 		parser:     parser,
 		screen:     screen,
 		scrollback: scrollback,
 		colors:     render.RandomSessionColor(),
 	}
 
-	// Connect PTY output to parser
-	session.SetOnData(func(data []byte) {
+	// Connect client data to parser
+	client.SetOnData(func(data []byte) {
 		parser.Parse(data)
-		// Invalidate windows
 		a.invalidateSession(name)
 	})
 
+	client.SetOnExit(func(err error) {
+		a.mu.Lock()
+		delete(a.sessions, name)
+		a.mu.Unlock()
+		if a.controlWin != nil {
+			a.controlWin.Invalidate()
+		}
+	})
+
+	client.Start()
+
+	a.mu.Lock()
 	a.sessions[name] = state
+	a.mu.Unlock()
+
 	return state, nil
 }
 
@@ -259,7 +351,15 @@ func (a *App) GetSession(name string) *SessionState {
 
 // ListSessions returns all session names
 func (a *App) ListSessions() []string {
-	return a.manager.List()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	names := make([]string, 0, len(a.sessions))
+	for name := range a.sessions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // CloseSession closes a session (case-insensitive)
@@ -280,11 +380,19 @@ func (a *App) CloseSession(name string) error {
 	delete(a.sessions, actualName)
 	a.mu.Unlock()
 
-	if state != nil && state.window != nil {
+	if state == nil {
+		return ErrSessionNotFound
+	}
+
+	if state.window != nil {
 		state.window.Close()
 	}
 
-	return a.manager.Close(actualName)
+	if state.client != nil {
+		return state.client.Terminate()
+	}
+
+	return nil
 }
 
 // invalidateSession signals windows to redraw for a session
@@ -306,7 +414,7 @@ func (a *App) invalidateSession(name string) {
 func (a *App) CreateTerminalWindow(name string) (*TerminalWindow, error) {
 	state := a.GetSession(name)
 	if state == nil {
-		return nil, pty.ErrSessionNotFound
+		return nil, ErrSessionNotFound
 	}
 
 	win := NewTerminalWindow(a, state)
@@ -349,20 +457,9 @@ func (a *App) IsDiscordConnected() bool {
 // AddSession creates a new session, starts it, and creates a terminal window
 // This is the main entry point for adding sessions (both initial and via IPC)
 func (a *App) AddSession(name string, sshHost string) error {
-	// Create session
-	state, err := a.NewSession(name)
+	// Create and start session (spawns daemon, connects)
+	_, err := a.NewSession(name, sshHost)
 	if err != nil {
-		return err
-	}
-
-	// Start session
-	if sshHost != "" {
-		err = state.Session().StartSSH(sshHost)
-	} else {
-		err = state.Session().Start()
-	}
-	if err != nil {
-		a.CloseSession(name)
 		return err
 	}
 

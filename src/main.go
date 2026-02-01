@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -13,12 +14,39 @@ import (
 	"claude-term/src/discord"
 	"claude-term/src/gui"
 	"claude-term/src/ipc"
+	"claude-term/src/session"
 )
 
 const daemonEnvVar = "CLAUDE_TERM_DAEMON"
 
 func main() {
-	// Check if we're the daemon process
+	// Internal: spawned as a session daemon (PTY holder process)
+	if idx := findArg("--session-daemon"); idx >= 0 && idx+1 < len(os.Args) {
+		name := os.Args[idx+1]
+		cols := uint16(120)
+		rows := uint16(24)
+		var sshHost string
+
+		if i := findArg("--cols"); i >= 0 && i+1 < len(os.Args) {
+			if v, err := strconv.Atoi(os.Args[i+1]); err == nil {
+				cols = uint16(v)
+			}
+		}
+		if i := findArg("--rows"); i >= 0 && i+1 < len(os.Args) {
+			if v, err := strconv.Atoi(os.Args[i+1]); err == nil {
+				rows = uint16(v)
+			}
+		}
+		if i := findArg("--ssh"); i >= 0 && i+1 < len(os.Args) {
+			sshHost = os.Args[i+1]
+		}
+
+		daemon := session.NewDaemon(name, cols, rows, sshHost)
+		daemon.Run()
+		return
+	}
+
+	// Internal: main daemon process (GUI/Discord/IPC)
 	if os.Getenv(daemonEnvVar) == "1" {
 		runDaemon()
 		return
@@ -186,4 +214,13 @@ Examples:
   claude-term "My Project"
   claude-term ssh user@host "Remote Work"
   claude-term ssh myserver`)
+}
+
+func findArg(name string) int {
+	for i, arg := range os.Args {
+		if arg == name {
+			return i
+		}
+	}
+	return -1
 }
