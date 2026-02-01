@@ -67,5 +67,12 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 - Use persistent maps keyed by stable IDs (e.g., session names)
 - `event.Op(gtx.Ops, target)` registers target - target must be same object each frame
 
+### Discord Bot
+- Auto-reconnects with exponential backoff (1s to 10 min) on disconnect
+- Daemon stays running when control window closes (for Discord-only operation)
+- Commands: `/term list`, `/term new`, `/term screenshot`, `/term run`, `/term connect`, `/term disconnect`, `/term focus`, `/term close`
+- Token stored in macOS keyring (`claude-term/discord_bot_token`)
+- Logs to `~/.config/claude-term/discord.log`
+
 ## Testing
 74 tests covering emulator, PTY, rendering, GUI app logic.
