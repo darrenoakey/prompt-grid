@@ -20,6 +20,12 @@ import (
 const daemonEnvVar = "CLAUDE_TERM_DAEMON"
 
 func main() {
+	// Start as main daemon directly (for auto/launchd)
+	if findArg("--daemon") >= 0 {
+		runDaemon()
+		return
+	}
+
 	// Internal: spawned as a session daemon (PTY holder process)
 	if idx := findArg("--session-daemon"); idx >= 0 && idx+1 < len(os.Args) {
 		name := os.Args[idx+1]
