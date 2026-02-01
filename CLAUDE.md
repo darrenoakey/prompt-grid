@@ -66,6 +66,9 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 - Creating new objects each frame breaks event routing (e.g., tab clicks)
 - Use persistent maps keyed by stable IDs (e.g., session names)
 - `event.Op(gtx.Ops, target)` registers target - target must be same object each frame
+- Right-click: check `e.Buttons.Contain(pointer.ButtonSecondary)` or control+click
+- After state changes, call `window.Invalidate()` to trigger redraw
+- Cross-window operations (e.g., raising another window) must be async via goroutine to avoid deadlock
 
 ### Discord Bot
 - Auto-reconnects with exponential backoff (1s to 10 min) on disconnect
