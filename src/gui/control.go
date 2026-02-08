@@ -457,8 +457,10 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 		w.termWidgets[w.selected] = widget
 	}
 
-	// Handle keyboard input for the terminal
-	w.handleTerminalInput(gtx, state)
+	// Handle keyboard input for the terminal (skip during rename to avoid stealing key events)
+	if !w.renameState.active {
+		w.handleTerminalInput(gtx, state)
+	}
 
 	// Add padding around terminal
 	padding := 8
@@ -705,6 +707,9 @@ func (w *ControlWindow) handleRenameInput(gtx layout.Context) {
 	// Set up input area for the rename state
 	areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
 	event.Op(gtx.Ops, w.renameState)
+
+	// Request keyboard focus so key.EditEvent (typed characters) are delivered here
+	gtx.Execute(key.FocusCmd{Tag: w.renameState})
 
 	for {
 		ev, ok := gtx.Event(

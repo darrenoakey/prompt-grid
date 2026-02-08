@@ -311,7 +311,8 @@ func (a *App) reconnectSession(name string) error {
 			return
 		}
 		termWin.Run()
-		a.CloseSession(name)
+		// Window closed = detach only (tmux session survives for reconnection)
+		a.detachSession(name)
 	}()
 
 	return nil
@@ -424,6 +425,15 @@ func (a *App) ListSessions() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// detachSession clears the window reference when a standalone window closes.
+// The PTY and tmux session remain alive (session stays functional in control center).
+func (a *App) detachSession(name string) {
+	state := a.GetSession(name)
+	if state != nil {
+		state.window = nil
+	}
 }
 
 // CloseSession closes a session (case-insensitive)
@@ -582,8 +592,8 @@ func (a *App) AddSession(name string, sshHost string) error {
 		// Run terminal window event loop
 		termWin.Run()
 
-		// Close session when window closes
-		a.CloseSession(name)
+		// Window closed = detach only (tmux session survives for reconnection)
+		a.detachSession(name)
 	}()
 
 	// Invalidate control window to show new session
