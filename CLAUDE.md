@@ -44,7 +44,8 @@ Key behaviors:
 - Each session gets a PTY running `tmux attach-session -t <name>`
 - ANSI parser reads PTY output identically to before -- rendering pipeline unchanged
 - tmux configured to be invisible: status bar off, prefix key disabled, all keybindings unbound
-- Close session = kill tmux session; close window = detach (tmux session survives)
+- Close session (`CloseSession`) = kill tmux session + close PTY + close window
+- Close window (`detachSession`) = clear window ref only; PTY and tmux session stay alive
 - SSH sessions: `tmux new-session` with `ssh host` as the initial command
 
 tmux wrapper (`src/tmux/tmux.go`):
@@ -139,6 +140,7 @@ Rename sessions:
 - After state changes, call `window.Invalidate()` to trigger redraw
 - Cross-window operations (e.g., raising another window) must be async via goroutine to avoid deadlock
 - **CRITICAL**: All pointer event types (Press, Drag, Release, Scroll) must be in ONE filter - separate filters don't work
+- **CRITICAL**: When switching keyboard input between handlers (e.g., rename input vs terminal), explicitly request focus with `gtx.Execute(key.FocusCmd{Tag: target})`. Without it, `key.EditEvent` (typed characters) won't be delivered to the new handler. Also disable competing handlers during the switch to prevent event stealing.
 
 ### Discord Bot
 - Auto-reconnects with exponential backoff (1s to 10 min) on disconnect
