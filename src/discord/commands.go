@@ -185,7 +185,7 @@ func (h *CommandHandler) HandleRun(options []*discordgo.ApplicationCommandIntera
 	}
 
 	// Send command to session (add newline for enter)
-	_, err := state.Client().Write([]byte(cmd + "\n"))
+	_, err := state.PTY().Write([]byte(cmd + "\n"))
 	if err != nil {
 		h.respond(fmt.Sprintf("Failed to send command: %v", err), true)
 		return

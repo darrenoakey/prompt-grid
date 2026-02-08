@@ -97,50 +97,73 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 
 	areaStack.Pop()
 
-	// Process pointer events for selection
+	// Process pointer events for selection and scrolling
+	// All pointer event types must be in a single filter
 	for {
 		ev, ok := gtx.Event(
-			pointer.Filter{Target: w, Kinds: pointer.Press | pointer.Drag | pointer.Release},
+			pointer.Filter{Target: w, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll},
 		)
 		if !ok {
 			break
 		}
 		if e, ok := ev.(pointer.Event); ok {
-			// Convert pixel position to cell coordinates
-			cellX := (int(e.Position.X) - padding) / w.cellW
-			cellY := (int(e.Position.Y) - padding) / w.cellH
-
-			// Clamp to screen bounds
-			cols, rows := w.state.screen.Size()
-			if cellX < 0 {
-				cellX = 0
-			}
-			if cellX >= cols {
-				cellX = cols - 1
-			}
-			if cellY < 0 {
-				cellY = 0
-			}
-			if cellY >= rows {
-				cellY = rows - 1
-			}
-
 			switch e.Kind {
-			case pointer.Press:
-				w.focused = true
-				w.state.StartSelection(cellX, cellY)
-			case pointer.Drag:
-				w.state.UpdateSelection(cellX, cellY)
-			case pointer.Release:
-				w.state.EndSelection()
-				// Copy selection to clipboard on release
-				if w.state.HasSelection() {
-					selectedText := w.state.GetSelectedText()
-					if len(selectedText) > 0 {
-						gtx.Execute(clipboard.WriteCmd{
-							Type: "text/plain",
-							Data: io.NopCloser(strings.NewReader(selectedText)),
-						})
+			case pointer.Scroll:
+				// Scroll.Y: positive = scroll down (toward bottom), negative = scroll up (toward top/history)
+				// We want: scroll up (negative Y) = increase offset (view history)
+				// Convert pixels to lines - trackpad sends small increments
+				delta := int(e.Scroll.Y / 3) // Positive Y = scroll down = decrease offset
+				if delta == 0 && e.Scroll.Y != 0 {
+					// Ensure at least 1 line scroll for small movements
+					if e.Scroll.Y > 0 {
+						delta = 1
+					} else {
+						delta = -1
+					}
+				}
+				// Invert: scrolling down (positive delta) should decrease offset (toward live)
+				// scrolling up (negative delta) should increase offset (toward history)
+				w.state.AdjustScrollOffset(-delta)
+
+			case pointer.Press, pointer.Drag, pointer.Release:
+				// Convert pixel position to cell coordinates
+				cellX := (int(e.Position.X) - padding) / w.cellW
+				cellY := (int(e.Position.Y) - padding) / w.cellH
+
+				// Clamp to screen bounds
+				cols, rows := w.state.screen.Size()
+				if cellX < 0 {
+					cellX = 0
+				}
+				if cellX >= cols {
+					cellX = cols - 1
+				}
+				if cellY < 0 {
+					cellY = 0
+				}
+				if cellY >= rows {
+					cellY = rows - 1
+				}
+
+				switch e.Kind {
+				case pointer.Press:
+					w.focused = true
+					// Request keyboard focus when clicked
+					gtx.Execute(key.FocusCmd{Tag: w})
+					w.state.StartSelection(cellX, cellY)
+				case pointer.Drag:
+					w.state.UpdateSelection(cellX, cellY)
+				case pointer.Release:
+					w.state.EndSelection()
+					// Copy selection to clipboard on release
+					if w.state.HasSelection() {
+						selectedText := w.state.GetSelectedText()
+						if len(selectedText) > 0 {
+							gtx.Execute(clipboard.WriteCmd{
+								Type: "text/plain",
+								Data: io.NopCloser(strings.NewReader(selectedText)),
+							})
+						}
 					}
 				}
 			}
@@ -173,7 +196,7 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 			// Clear selection on any text input
 			w.state.ClearSelection()
 			if len(e.Text) > 0 {
-				w.state.client.Write([]byte(e.Text))
+				w.state.pty.Write([]byte(e.Text))
 			}
 		case key.Event:
 			if e.State == key.Press {
@@ -213,7 +236,7 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 				content, _ := io.ReadAll(data)
 				data.Close()
 				if len(content) > 0 {
-					w.state.client.Write(content)
+					w.state.pty.Write(content)
 				}
 			}
 		}
@@ -279,21 +302,45 @@ func (w *TerminalWidget) handleKeyEvent(e key.Event) {
 	}
 
 	if len(data) > 0 {
-		w.state.client.Write(data)
+		w.state.pty.Write(data)
 	}
 }
 
 func (w *TerminalWidget) renderCells(gtx layout.Context) {
 	screen := w.state.screen
 	cols, rows := screen.Size()
+	scrollback := w.state.scrollback
+	scrollOffset := w.state.ScrollOffset()
+	scrollbackCount := scrollback.Count()
 
 	// Create a theme for text rendering
 	th := material.NewTheme()
 	th.Shaper = w.shaper
 
 	for y := 0; y < rows; y++ {
+		// Calculate which line to display at screen row y
+		// When scrollOffset=0, we show the current screen (scrollbackCount + y maps to screen line y)
+		// When scrollOffset>0, we're viewing history
+		viewLine := scrollbackCount - scrollOffset + y
+
 		for x := 0; x < cols; x++ {
-			cell := screen.Cell(x, y)
+			var cell emulator.Cell
+			if viewLine < 0 {
+				// Before any content - empty cell
+				cell = emulator.Cell{}
+			} else if viewLine < scrollbackCount {
+				// Line from scrollback
+				line := scrollback.Line(viewLine)
+				if line != nil && x < len(line) {
+					cell = line[x]
+				}
+			} else {
+				// Line from current screen
+				screenY := viewLine - scrollbackCount
+				if screenY < rows {
+					cell = screen.Cell(x, screenY)
+				}
+			}
 			w.renderCell(gtx, th, x, y, cell)
 		}
 	}

@@ -1,33 +1,32 @@
 package gui
 
 import (
+	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"claude-term/src/session"
+	"claude-term/src/tmux"
 )
 
-func init() {
-	// Set binary path for tests - assumes binary is pre-built
-	// Skip if not available (tests will fail gracefully)
-	if os.Getenv("CLAUDE_TERM_BIN") == "" {
-		// Try to find the binary relative to the test location
-		candidates := []string{
-			"../../output/claude-term",
-			"../../../output/claude-term",
-			filepath.Join(os.Getenv("HOME"), "bin", "claude-term"),
-		}
-		for _, path := range candidates {
-			if abs, err := filepath.Abs(path); err == nil {
-				if _, err := os.Stat(abs); err == nil {
-					os.Setenv("CLAUDE_TERM_BIN", abs)
-					break
-				}
-			}
-		}
-	}
+var testRealm string
+
+// TestMain sets up realm isolation and runs tests
+func TestMain(m *testing.M) {
+	// Set up unique realm for this test run - completely isolated from production
+	testRealm = fmt.Sprintf("test-%d-%d", os.Getpid(), time.Now().UnixNano())
+	os.Setenv(tmux.RealmEnvVar, testRealm)
+
+	// Run tests
+	code := m.Run()
+
+	// Cleanup: kill entire tmux server for this realm
+	tmux.KillServer()
+
+	// Remove IPC socket directory
+	os.RemoveAll(tmux.GetSocketDir())
+
+	os.Exit(code)
 }
 
 func TestNewApp(t *testing.T) {
@@ -49,8 +48,8 @@ func TestAppNewSession(t *testing.T) {
 	if state == nil {
 		t.Fatal("NewSession() returned nil state")
 	}
-	if state.Client() == nil {
-		t.Error("Client() should not be nil")
+	if state.PTY() == nil {
+		t.Error("PTY() should not be nil")
 	}
 	if state.Screen() == nil {
 		t.Error("Screen() should not be nil")
@@ -59,7 +58,7 @@ func TestAppNewSession(t *testing.T) {
 		t.Error("Scrollback() should not be nil")
 	}
 
-	// Give daemon time to clean up
+	// Give time for cleanup
 	time.Sleep(100 * time.Millisecond)
 }
 
@@ -138,48 +137,44 @@ func TestAppFontSize(t *testing.T) {
 	}
 }
 
-func TestSessionDaemonLifecycle(t *testing.T) {
-	name := "test-daemon-lifecycle"
+func TestTmuxSessionLifecycle(t *testing.T) {
+	name := "test-tmux-lifecycle"
 
-	// Spawn daemon
-	err := session.SpawnDaemon(name, 80, 24, "")
+	// Create tmux session
+	err := tmux.NewSession(name, "", 80, 24)
 	if err != nil {
-		t.Fatalf("SpawnDaemon() error = %v", err)
+		t.Fatalf("NewSession() error = %v", err)
 	}
 
-	// Check it's alive
-	if !session.IsSessionAlive(name) {
-		t.Error("Session should be alive after spawn")
+	// Check it exists
+	if !tmux.HasSession(name) {
+		t.Error("Session should exist after creation")
 	}
 
-	// Connect
-	client, err := session.Connect(name)
+	// Check it appears in list
+	sessions, err := tmux.ListSessions()
 	if err != nil {
-		t.Fatalf("Connect() error = %v", err)
+		t.Fatalf("ListSessions() error = %v", err)
 	}
-
-	// Verify info
-	info := client.Info()
-	if info.Name != name {
-		t.Errorf("Info.Name = %q, want %q", info.Name, name)
-	}
-	if info.Cols != 80 || info.Rows != 24 {
-		t.Errorf("Info size = %dx%d, want 80x24", info.Cols, info.Rows)
-	}
-
-	// Terminate
-	err = client.Terminate()
-	if err != nil {
-		t.Errorf("Terminate() error = %v", err)
-	}
-
-	// Wait for cleanup - daemon needs time to process close and exit
-	for i := 0; i < 20; i++ {
-		time.Sleep(100 * time.Millisecond)
-		if !session.IsSessionAlive(name) {
-			return // Success
+	found := false
+	for _, s := range sessions {
+		if s == name {
+			found = true
+			break
 		}
 	}
+	if !found {
+		t.Errorf("ListSessions() = %v, should contain %q", sessions, name)
+	}
 
-	t.Error("Session should not be alive after terminate")
+	// Kill it
+	err = tmux.KillSession(name)
+	if err != nil {
+		t.Errorf("KillSession() error = %v", err)
+	}
+
+	// Verify it's gone
+	if tmux.HasSession(name) {
+		t.Error("Session should not exist after kill")
+	}
 }

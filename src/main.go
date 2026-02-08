@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
+	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 	"claude-term/src/discord"
 	"claude-term/src/gui"
 	"claude-term/src/ipc"
-	"claude-term/src/session"
+	"claude-term/src/tmux"
 )
 
 const daemonEnvVar = "CLAUDE_TERM_DAEMON"
@@ -23,32 +24,6 @@ func main() {
 	// Start as main daemon directly (for auto/launchd)
 	if findArg("--daemon") >= 0 {
 		runDaemon()
-		return
-	}
-
-	// Internal: spawned as a session daemon (PTY holder process)
-	if idx := findArg("--session-daemon"); idx >= 0 && idx+1 < len(os.Args) {
-		name := os.Args[idx+1]
-		cols := uint16(120)
-		rows := uint16(24)
-		var sshHost string
-
-		if i := findArg("--cols"); i >= 0 && i+1 < len(os.Args) {
-			if v, err := strconv.Atoi(os.Args[i+1]); err == nil {
-				cols = uint16(v)
-			}
-		}
-		if i := findArg("--rows"); i >= 0 && i+1 < len(os.Args) {
-			if v, err := strconv.Atoi(os.Args[i+1]); err == nil {
-				rows = uint16(v)
-			}
-		}
-		if i := findArg("--ssh"); i >= 0 && i+1 < len(os.Args) {
-			sshHost = os.Args[i+1]
-		}
-
-		daemon := session.NewDaemon(name, cols, rows, sshHost)
-		daemon.Run()
 		return
 	}
 
@@ -154,6 +129,27 @@ func spawnDaemon() {
 }
 
 func runDaemon() {
+	// Single-instance guard: acquire exclusive file lock (race-free via kernel)
+	lockPath := filepath.Join(tmux.GetSocketDir(), "daemon.lock")
+	os.MkdirAll(filepath.Dir(lockPath), 0755)
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating lock file: %v\n", err)
+		os.Exit(1)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		fmt.Fprintln(os.Stderr, "Another claude-term daemon is already running, exiting")
+		lockFile.Close()
+		os.Exit(0)
+	}
+	// Keep lockFile open for process lifetime (lock released on exit)
+
+	// Ensure tmux is available
+	if err := tmux.EnsureInstalled(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Create application
 	application := gui.NewApp()
 
@@ -192,7 +188,11 @@ func runDaemon() {
 	}
 
 	// Set bot reference in app for status display
-	application.SetDiscordBot(bot)
+	// Only set if non-nil; a nil *discord.Bot passed as DiscordStatus interface
+	// is not nil (Go interface semantics), causing a panic in IsConnected()
+	if bot != nil {
+		application.SetDiscordBot(bot)
+	}
 
 	// Create and run control window in background
 	// The daemon stays running even if control window is closed
@@ -207,6 +207,9 @@ func runDaemon() {
 
 	// Run Gio event loop - this keeps the daemon alive
 	app.Main()
+
+	// Prevent GC from finalizing lockFile (which would release the flock)
+	runtime.KeepAlive(lockFile)
 }
 
 func printUsage() {

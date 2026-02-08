@@ -7,11 +7,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+
+	"claude-term/src/tmux"
 )
 
-// SocketPath returns the path to the IPC socket
+// SocketPath returns the path to the IPC socket.
+// Uses the session realm for test isolation.
 func SocketPath() string {
-	return filepath.Join(os.TempDir(), "claude-term.sock")
+	return filepath.Join(tmux.GetSocketDir(), "ipc.sock")
 }
 
 // Request represents a request to create a new session
@@ -69,8 +72,13 @@ type Server struct {
 
 // NewServer creates a new IPC server
 func NewServer(onRequest func(Request) error) (*Server, error) {
-	// Remove stale socket
+	// Ensure socket directory exists
 	sockPath := SocketPath()
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create socket dir: %w", err)
+	}
+
+	// Remove stale socket
 	os.Remove(sockPath)
 
 	listener, err := net.Listen("unix", sockPath)

@@ -1,8 +1,11 @@
 package gui
 
 import (
+	"fmt"
 	"image"
 	"image/color"
+	"strconv"
+	"strings"
 
 	"gioui.org/app"
 	"gioui.org/io/event"
@@ -24,13 +27,27 @@ const tabWidth = 200
 
 // ControlWindow is the control center showing all sessions
 type ControlWindow struct {
-	app         *App
-	window      *app.Window
-	shaper      *text.Shaper
-	ops         op.Ops
-	selected    string
-	tabStates   map[string]*tabState // Persistent tab states keyed by name
-	contextMenu *contextMenuState    // Right-click context menu
+	app            *App
+	window         *app.Window
+	shaper         *text.Shaper
+	ops            op.Ops
+	selected       string
+	tabStates      map[string]*tabState       // Persistent tab states keyed by name
+	termWidgets    map[string]*TerminalWidget // Persistent terminal widgets keyed by session name
+	contextMenu    *contextMenuState          // Right-click context menu
+	tabPanelBg     *tabPanelBackground        // For right-click on empty tab area
+	renameState    *renameState               // For renaming sessions
+}
+
+// tabPanelBackground is a persistent target for right-click on empty tab area
+type tabPanelBackground struct{}
+
+// renameState tracks active rename operation
+type renameState struct {
+	active      bool
+	sessionName string
+	newName     string
+	cursorPos   int
 }
 
 type tabState struct {
@@ -58,7 +75,10 @@ func NewControlWindow(application *App) *ControlWindow {
 		app:         application,
 		window:      new(app.Window),
 		tabStates:   make(map[string]*tabState),
+		termWidgets: make(map[string]*TerminalWidget),
 		contextMenu: &contextMenuState{},
+		tabPanelBg:  &tabPanelBackground{},
+		renameState: &renameState{},
 	}
 
 	win.window.Option(
@@ -113,6 +133,11 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		w.selected = sessions[0]
 	}
 
+	// Handle rename keyboard input
+	if w.renameState.active {
+		w.handleRenameInput(gtx)
+	}
+
 	// Handle clicks outside context menu to dismiss it
 	if w.contextMenu.visible {
 		areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
@@ -164,6 +189,28 @@ func (w *ControlWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
 	// Background
 	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: panelHeight}}.Op()
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 40, G: 40, B: 40, A: 255}, rect)
+
+	// Handle right-click on the tab panel background (empty area)
+	// This must cover the entire panel but let tab events through
+	bgAreaStack := clip.Rect{Max: image.Point{X: tabWidth, Y: panelHeight}}.Push(gtx.Ops)
+	event.Op(gtx.Ops, w.tabPanelBg)
+	for {
+		ev, ok := gtx.Event(
+			pointer.Filter{Target: w.tabPanelBg, Kinds: pointer.Press},
+		)
+		if !ok {
+			break
+		}
+		if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
+			isRightClick := e.Buttons.Contain(pointer.ButtonSecondary) ||
+				(e.Modifiers.Contain(key.ModCtrl) && e.Buttons.Contain(pointer.ButtonPrimary))
+			if isRightClick {
+				// Right-click on empty area - show menu with "New Session" only
+				w.showContextMenu("", image.Point{X: int(e.Position.X), Y: int(e.Position.Y)})
+			}
+		}
+	}
+	bgAreaStack.Pop()
 
 	// Layout tabs vertically
 	sessions := w.app.ListSessions()
@@ -250,40 +297,45 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int
 		sessionFg = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
 	}
 
-	// Handle input
-	areaStack := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Push(gtx.Ops)
-	event.Op(gtx.Ops, tab)
+	// Check if this tab is being renamed
+	isRenaming := w.renameState.active && w.renameState.sessionName == tab.name
 
-	for {
-		ev, ok := gtx.Event(
-			pointer.Filter{Target: tab, Kinds: pointer.Press | pointer.Enter | pointer.Leave},
-		)
-		if !ok {
-			break
-		}
-		switch e := ev.(type) {
-		case pointer.Event:
-			switch e.Kind {
-			case pointer.Enter:
-				tab.hovered = true
-			case pointer.Leave:
-				tab.hovered = false
-			case pointer.Press:
-				// Check for right-click (secondary button or control+click on macOS)
-				isRightClick := e.Buttons.Contain(pointer.ButtonSecondary) ||
-					(e.Modifiers.Contain(key.ModCtrl) && e.Buttons.Contain(pointer.ButtonPrimary))
-				if isRightClick {
-					// Right-click - show context menu
-					w.showContextMenu(tab.name, image.Point{X: int(e.Position.X), Y: offsetY + int(e.Position.Y)})
-				} else {
-					// Left-click - select tab
-					w.selected = tab.name
-					w.contextMenu.visible = false // Close context menu on left click
+	// Handle input (only if not renaming)
+	if !isRenaming {
+		areaStack := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Push(gtx.Ops)
+		event.Op(gtx.Ops, tab)
+
+		for {
+			ev, ok := gtx.Event(
+				pointer.Filter{Target: tab, Kinds: pointer.Press | pointer.Enter | pointer.Leave},
+			)
+			if !ok {
+				break
+			}
+			switch e := ev.(type) {
+			case pointer.Event:
+				switch e.Kind {
+				case pointer.Enter:
+					tab.hovered = true
+				case pointer.Leave:
+					tab.hovered = false
+				case pointer.Press:
+					// Check for right-click (secondary button or control+click on macOS)
+					isRightClick := e.Buttons.Contain(pointer.ButtonSecondary) ||
+						(e.Modifiers.Contain(key.ModCtrl) && e.Buttons.Contain(pointer.ButtonPrimary))
+					if isRightClick {
+						// Right-click - show context menu
+						w.showContextMenu(tab.name, image.Point{X: int(e.Position.X), Y: offsetY + int(e.Position.Y)})
+					} else {
+						// Left-click - select tab
+						w.selected = tab.name
+						w.contextMenu.visible = false // Close context menu on left click
+					}
 				}
 			}
 		}
+		areaStack.Pop()
 	}
-	areaStack.Pop()
 
 	// Draw session background color for entire tab
 	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
@@ -294,19 +346,64 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int
 		// White highlight for selected
 		highlightRect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
 		paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 40}, highlightRect)
-	} else if tab.hovered {
+	} else if tab.hovered && !isRenaming {
 		// Subtle white highlight for hovered
 		highlightRect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
 		paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 20}, highlightRect)
 	}
 
-	// Draw tab name using session's foreground color
+	// Draw tab name or rename input
 	th := material.NewTheme()
 	th.Shaper = w.shaper
-	label := material.Label(th, unit.Sp(14), tab.name)
-	label.Color = sessionFg
 
-	// Position label with padding
+	if isRenaming {
+		// Draw rename input field
+		w.layoutRenameInput(gtx, sessionFg, height)
+	} else {
+		// Draw normal tab name
+		label := material.Label(th, unit.Sp(14), tab.name)
+		label.Color = sessionFg
+
+		// Position label with padding
+		stack := op.Offset(image.Pt(12, 10)).Push(gtx.Ops)
+		labelGtx := gtx
+		labelGtx.Constraints = layout.Constraints{
+			Min: image.Point{X: 0, Y: 0},
+			Max: image.Point{X: tabWidth - 24, Y: height - 10},
+		}
+		label.Layout(labelGtx)
+		stack.Pop()
+	}
+
+	return layout.Dimensions{Size: image.Point{X: tabWidth, Y: height}}
+}
+
+// layoutRenameInput draws the rename text input
+func (w *ControlWindow) layoutRenameInput(gtx layout.Context, fg color.NRGBA, height int) {
+	// Draw input background (slightly darker)
+	inputBg := clip.Rect{
+		Min: image.Point{X: 8, Y: 6},
+		Max: image.Point{X: tabWidth - 8, Y: height - 6},
+	}.Op()
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 20, G: 20, B: 20, A: 255}, inputBg)
+
+	// Draw input border
+	borderColor := color.NRGBA{R: 100, G: 150, B: 255, A: 255}
+	for _, edge := range []clip.Rect{
+		{Min: image.Point{X: 8, Y: 6}, Max: image.Point{X: tabWidth - 8, Y: 7}},                 // top
+		{Min: image.Point{X: 8, Y: height - 7}, Max: image.Point{X: tabWidth - 8, Y: height - 6}}, // bottom
+		{Min: image.Point{X: 8, Y: 6}, Max: image.Point{X: 9, Y: height - 6}},                   // left
+		{Min: image.Point{X: tabWidth - 9, Y: 6}, Max: image.Point{X: tabWidth - 8, Y: height - 6}}, // right
+	} {
+		paint.FillShape(gtx.Ops, borderColor, edge.Op())
+	}
+
+	// Draw text
+	th := material.NewTheme()
+	th.Shaper = w.shaper
+	label := material.Label(th, unit.Sp(14), w.renameState.newName)
+	label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+
 	stack := op.Offset(image.Pt(12, 10)).Push(gtx.Ops)
 	labelGtx := gtx
 	labelGtx.Constraints = layout.Constraints{
@@ -316,7 +413,15 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int
 	label.Layout(labelGtx)
 	stack.Pop()
 
-	return layout.Dimensions{Size: image.Point{X: tabWidth, Y: height}}
+	// Draw cursor (simple blinking not implemented, just static cursor)
+	// Approximate cursor position based on character count
+	charWidth := 8 // Approximate pixels per character at this font size
+	cursorX := 12 + w.renameState.cursorPos*charWidth
+	cursorRect := clip.Rect{
+		Min: image.Point{X: cursorX, Y: 10},
+		Max: image.Point{X: cursorX + 1, Y: height - 12},
+	}.Op()
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, cursorRect)
 }
 
 func (w *ControlWindow) layoutSeparator(gtx layout.Context) layout.Dimensions {
@@ -344,8 +449,13 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 		return layout.Dimensions{Size: gtx.Constraints.Max}
 	}
 
-	// Create widget for this session with padding
-	widget := NewTerminalWidget(state, state.Colors(), w.app.FontSize(), w.shaper)
+	// Get or create persistent widget for this session
+	// Must persist across frames for event routing to work
+	widget, ok := w.termWidgets[w.selected]
+	if !ok {
+		widget = NewTerminalWidget(state, state.Colors(), w.app.FontSize(), w.shaper)
+		w.termWidgets[w.selected] = widget
+	}
 
 	// Handle keyboard input for the terminal
 	w.handleTerminalInput(gtx, state)
@@ -379,7 +489,7 @@ func (w *ControlWindow) handleTerminalInput(gtx layout.Context, state *SessionSt
 		switch e := ev.(type) {
 		case key.EditEvent:
 			if len(e.Text) > 0 {
-				state.client.Write([]byte(e.Text))
+				state.pty.Write([]byte(e.Text))
 			}
 		case key.Event:
 			if e.State == key.Press {
@@ -444,7 +554,7 @@ func (w *ControlWindow) handleKeyEvent(state *SessionState, e key.Event) {
 	}
 
 	if len(data) > 0 {
-		state.client.Write(data)
+		state.pty.Write(data)
 	}
 }
 
@@ -472,30 +582,183 @@ func (w *ControlWindow) showContextMenu(sessionName string, pos image.Point) {
 	w.contextMenu.visible = true
 	w.contextMenu.sessionName = sessionName
 	w.contextMenu.position = pos
-	w.contextMenu.items = []*menuItem{
-		{
+
+	// Build menu items based on context
+	items := []*menuItem{}
+
+	// "New Session" is always available
+	items = append(items, &menuItem{
+		label: "New Session",
+		action: func() {
+			w.contextMenu.visible = false
+			w.window.Invalidate()
+			// Create new session with auto-generated name
+			newName := w.nextSessionName()
+			go func() {
+				err := w.app.AddSession(newName, "")
+				if err == nil {
+					w.selected = newName
+					w.window.Invalidate()
+				}
+			}()
+		},
+	})
+
+	// Session-specific menu items only when clicking on a tab
+	if sessionName != "" {
+		items = append(items, &menuItem{
+			label: "Rename",
+			action: func() {
+				w.contextMenu.visible = false
+				w.startRename(sessionName)
+				w.window.Invalidate()
+			},
+		})
+
+		items = append(items, &menuItem{
 			label: "Bring to Front",
 			action: func() {
 				w.contextMenu.visible = false
-				w.window.Invalidate() // Immediately redraw without menu
-				// Run async to avoid blocking the event loop
+				w.window.Invalidate()
 				go func() {
 					if state := w.app.GetSession(sessionName); state != nil && state.window != nil {
 						state.window.BringToFront()
 					}
 				}()
 			},
-		},
-		{
+		})
+
+		items = append(items, &menuItem{
 			label: "Close",
 			action: func() {
 				w.contextMenu.visible = false
-				w.window.Invalidate() // Immediately redraw without menu
-				// Run async to avoid blocking
+				w.window.Invalidate()
 				go w.app.CloseSession(sessionName)
 			},
-		},
+		})
 	}
+
+	w.contextMenu.items = items
+}
+
+// nextSessionName returns the next available "Session N" name
+func (w *ControlWindow) nextSessionName() string {
+	sessions := w.app.ListSessions()
+
+	// Find all existing "Session N" numbers
+	usedNumbers := make(map[int]bool)
+	for _, name := range sessions {
+		if strings.HasPrefix(name, "Session ") {
+			numStr := strings.TrimPrefix(name, "Session ")
+			if num, err := strconv.Atoi(numStr); err == nil {
+				usedNumbers[num] = true
+			}
+		}
+	}
+
+	// Find the smallest available number
+	for i := 1; ; i++ {
+		if !usedNumbers[i] {
+			return fmt.Sprintf("Session %d", i)
+		}
+	}
+}
+
+// startRename begins the rename operation for a session
+func (w *ControlWindow) startRename(sessionName string) {
+	w.renameState.active = true
+	w.renameState.sessionName = sessionName
+	w.renameState.newName = sessionName
+	w.renameState.cursorPos = len(sessionName)
+}
+
+// cancelRename cancels the rename operation
+func (w *ControlWindow) cancelRename() {
+	w.renameState.active = false
+	w.renameState.sessionName = ""
+	w.renameState.newName = ""
+}
+
+// confirmRename applies the rename
+func (w *ControlWindow) confirmRename() {
+	if w.renameState.newName != "" && w.renameState.newName != w.renameState.sessionName {
+		oldName := w.renameState.sessionName
+		newName := w.renameState.newName
+		err := w.app.RenameSession(oldName, newName)
+		if err == nil {
+			// Update selected if we renamed the selected session
+			if w.selected == oldName {
+				w.selected = newName
+			}
+			// Update term widget cache
+			if widget, ok := w.termWidgets[oldName]; ok {
+				delete(w.termWidgets, oldName)
+				w.termWidgets[newName] = widget
+			}
+		}
+	}
+	w.cancelRename()
+}
+
+// handleRenameInput processes keyboard input during rename
+func (w *ControlWindow) handleRenameInput(gtx layout.Context) {
+	// Set up input area for the rename state
+	areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
+	event.Op(gtx.Ops, w.renameState)
+
+	for {
+		ev, ok := gtx.Event(
+			key.Filter{Optional: key.ModShift | key.ModCtrl},
+		)
+		if !ok {
+			break
+		}
+		switch e := ev.(type) {
+		case key.EditEvent:
+			// Insert typed text at cursor position
+			if len(e.Text) > 0 {
+				before := w.renameState.newName[:w.renameState.cursorPos]
+				after := w.renameState.newName[w.renameState.cursorPos:]
+				w.renameState.newName = before + e.Text + after
+				w.renameState.cursorPos += len(e.Text)
+			}
+		case key.Event:
+			if e.State == key.Press {
+				switch e.Name {
+				case key.NameReturn, key.NameEnter:
+					w.confirmRename()
+				case key.NameEscape:
+					w.cancelRename()
+				case key.NameDeleteBackward:
+					if w.renameState.cursorPos > 0 {
+						before := w.renameState.newName[:w.renameState.cursorPos-1]
+						after := w.renameState.newName[w.renameState.cursorPos:]
+						w.renameState.newName = before + after
+						w.renameState.cursorPos--
+					}
+				case key.NameDeleteForward:
+					if w.renameState.cursorPos < len(w.renameState.newName) {
+						before := w.renameState.newName[:w.renameState.cursorPos]
+						after := w.renameState.newName[w.renameState.cursorPos+1:]
+						w.renameState.newName = before + after
+					}
+				case key.NameLeftArrow:
+					if w.renameState.cursorPos > 0 {
+						w.renameState.cursorPos--
+					}
+				case key.NameRightArrow:
+					if w.renameState.cursorPos < len(w.renameState.newName) {
+						w.renameState.cursorPos++
+					}
+				case key.NameHome:
+					w.renameState.cursorPos = 0
+				case key.NameEnd:
+					w.renameState.cursorPos = len(w.renameState.newName)
+				}
+			}
+		}
+	}
+	areaStack.Pop()
 }
 
 func (w *ControlWindow) layoutContextMenu(gtx layout.Context) {

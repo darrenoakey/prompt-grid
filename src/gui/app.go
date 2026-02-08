@@ -11,8 +11,9 @@ import (
 	"gioui.org/unit"
 
 	"claude-term/src/emulator"
+	"claude-term/src/pty"
 	"claude-term/src/render"
-	"claude-term/src/session"
+	"claude-term/src/tmux"
 )
 
 // ErrSessionNotFound is returned when a session is not found
@@ -40,12 +41,17 @@ type SelectionPoint struct {
 
 // SessionState holds state for a single session
 type SessionState struct {
-	client     *session.Client
+	pty        *pty.Session
+	name       string
+	sshHost    string
 	parser     *emulator.Parser
 	screen     *emulator.Screen
 	scrollback *emulator.Scrollback
 	window     *TerminalWindow
 	colors     render.SessionColor // Unique color for this session
+
+	// Scrollback viewing state
+	scrollOffset int // Lines scrolled up from bottom (0 = viewing live terminal)
 
 	// Selection state
 	selStart     SelectionPoint
@@ -54,9 +60,24 @@ type SessionState struct {
 	hasSelection bool // There is an active selection
 }
 
-// Client returns the session client
-func (s *SessionState) Client() *session.Client {
-	return s.client
+// PTY returns the pty session
+func (s *SessionState) PTY() *pty.Session {
+	return s.pty
+}
+
+// Name returns the session name
+func (s *SessionState) Name() string {
+	return s.name
+}
+
+// IsSSH returns true if this is an SSH session
+func (s *SessionState) IsSSH() bool {
+	return s.sshHost != ""
+}
+
+// SSHHost returns the SSH host
+func (s *SessionState) SSHHost() string {
+	return s.sshHost
 }
 
 // Screen returns the screen buffer
@@ -72,6 +93,33 @@ func (s *SessionState) Scrollback() *emulator.Scrollback {
 // Colors returns the session-specific color scheme
 func (s *SessionState) Colors() render.SessionColor {
 	return s.colors
+}
+
+// ScrollOffset returns the current scroll offset (lines up from bottom)
+func (s *SessionState) ScrollOffset() int {
+	return s.scrollOffset
+}
+
+// SetScrollOffset sets the scroll offset, clamping to valid range
+func (s *SessionState) SetScrollOffset(offset int) {
+	maxOffset := s.scrollback.Count()
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	s.scrollOffset = offset
+}
+
+// AdjustScrollOffset adds delta to scroll offset (positive = scroll up/back in history)
+func (s *SessionState) AdjustScrollOffset(delta int) {
+	s.SetScrollOffset(s.scrollOffset + delta)
+}
+
+// ResetScrollOffset snaps back to live view (bottom)
+func (s *SessionState) ResetScrollOffset() {
+	s.scrollOffset = 0
 }
 
 // StartSelection begins a new selection at the given cell position
@@ -191,57 +239,66 @@ func NewApp() *App {
 		fontSize: 14,
 	}
 
-	// Discover and reconnect to existing session daemons
+	// Discover and reconnect to existing tmux sessions
 	a.discoverSessions()
 
 	return a
 }
 
-// discoverSessions finds and reconnects to existing session daemons
+// discoverSessions finds and reconnects to existing tmux sessions
 func (a *App) discoverSessions() {
-	names := session.ListSessions()
+	names, _ := tmux.ListSessions()
 	for _, name := range names {
 		a.reconnectSession(name)
 	}
 }
 
-// reconnectSession connects to an existing session daemon
+// reconnectSession connects to an existing tmux session
 func (a *App) reconnectSession(name string) error {
-	client, err := session.Connect(name)
-	if err != nil {
-		return err
-	}
+	// Create PTY and attach to tmux session
+	cols := uint16(120)
+	rows := uint16(24)
+
+	ptySess := pty.NewSession(name)
 
 	// Create emulator components
-	info := client.Info()
-	screen := emulator.NewScreen(int(info.Cols), int(info.Rows))
+	screen := emulator.NewScreen(int(cols), int(rows))
 	scrollback := emulator.NewScrollback()
 	parser := emulator.NewParser(screen, scrollback)
 
 	state := &SessionState{
-		client:     client,
+		pty:        ptySess,
+		name:       name,
 		parser:     parser,
 		screen:     screen,
 		scrollback: scrollback,
 		colors:     render.RandomSessionColor(),
 	}
 
-	// Connect client data to parser
-	client.SetOnData(func(data []byte) {
+	// Connect PTY data to parser
+	ptySess.SetOnData(func(data []byte) {
 		parser.Parse(data)
+		state.ResetScrollOffset() // Snap to bottom on new output
 		a.invalidateSession(name)
 	})
 
-	client.SetOnExit(func(err error) {
-		a.mu.Lock()
-		delete(a.sessions, name)
-		a.mu.Unlock()
-		if a.controlWin != nil {
-			a.controlWin.Invalidate()
+	ptySess.SetOnExit(func(err error) {
+		// PTY exited - check if tmux session still exists (detach vs death)
+		if !tmux.HasSession(name) {
+			a.mu.Lock()
+			delete(a.sessions, name)
+			a.mu.Unlock()
+			if a.controlWin != nil {
+				a.controlWin.Invalidate()
+			}
 		}
 	})
 
-	client.Start()
+	// Start PTY with tmux attach
+	cmd, args := tmux.AttachArgs(name)
+	if err := ptySess.StartCommand(cmd, args); err != nil {
+		return err
+	}
 
 	a.mu.Lock()
 	a.sessions[name] = state
@@ -270,7 +327,7 @@ func (a *App) FontSize() unit.Sp {
 	return a.fontSize
 }
 
-// NewSession creates a new session by spawning a daemon and connecting
+// NewSession creates a new session by creating a tmux session and attaching via PTY
 func (a *App) NewSession(name string, sshHost string) (*SessionState, error) {
 	a.mu.Lock()
 	if _, exists := a.sessions[name]; exists {
@@ -279,18 +336,15 @@ func (a *App) NewSession(name string, sshHost string) (*SessionState, error) {
 	}
 	a.mu.Unlock()
 
-	// Spawn session daemon
+	// Create tmux session
 	cols := uint16(120)
 	rows := uint16(24)
-	if err := session.SpawnDaemon(name, cols, rows, sshHost); err != nil {
+	if err := tmux.NewSession(name, sshHost, cols, rows); err != nil {
 		return nil, err
 	}
 
-	// Connect to daemon
-	client, err := session.Connect(name)
-	if err != nil {
-		return nil, err
-	}
+	// Create PTY and attach
+	ptySess := pty.NewSession(name)
 
 	// Create emulator components
 	screen := emulator.NewScreen(int(cols), int(rows))
@@ -298,29 +352,39 @@ func (a *App) NewSession(name string, sshHost string) (*SessionState, error) {
 	parser := emulator.NewParser(screen, scrollback)
 
 	state := &SessionState{
-		client:     client,
+		pty:        ptySess,
+		name:       name,
+		sshHost:    sshHost,
 		parser:     parser,
 		screen:     screen,
 		scrollback: scrollback,
 		colors:     render.RandomSessionColor(),
 	}
 
-	// Connect client data to parser
-	client.SetOnData(func(data []byte) {
+	// Connect PTY data to parser
+	ptySess.SetOnData(func(data []byte) {
 		parser.Parse(data)
+		state.ResetScrollOffset() // Snap to bottom on new output
 		a.invalidateSession(name)
 	})
 
-	client.SetOnExit(func(err error) {
-		a.mu.Lock()
-		delete(a.sessions, name)
-		a.mu.Unlock()
-		if a.controlWin != nil {
-			a.controlWin.Invalidate()
+	ptySess.SetOnExit(func(err error) {
+		if !tmux.HasSession(name) {
+			a.mu.Lock()
+			delete(a.sessions, name)
+			a.mu.Unlock()
+			if a.controlWin != nil {
+				a.controlWin.Invalidate()
+			}
 		}
 	})
 
-	client.Start()
+	// Start PTY with tmux attach
+	cmd, args := tmux.AttachArgs(name)
+	if err := ptySess.StartCommand(cmd, args); err != nil {
+		tmux.KillSession(name) // cleanup on failure
+		return nil, err
+	}
 
 	a.mu.Lock()
 	a.sessions[name] = state
@@ -388,8 +452,53 @@ func (a *App) CloseSession(name string) error {
 		state.window.Close()
 	}
 
-	if state.client != nil {
-		return state.client.Terminate()
+	if state.pty != nil {
+		state.pty.Close()
+	}
+
+	tmux.KillSession(actualName)
+
+	return nil
+}
+
+// RenameSession renames a session
+func (a *App) RenameSession(oldName, newName string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	// Check if new name already exists
+	if _, exists := a.sessions[newName]; exists {
+		return fmt.Errorf("session %q already exists", newName)
+	}
+
+	// Find the actual key (case-insensitive)
+	actualName := oldName
+	nameLower := strings.ToLower(oldName)
+	for k := range a.sessions {
+		if strings.ToLower(k) == nameLower {
+			actualName = k
+			break
+		}
+	}
+
+	state := a.sessions[actualName]
+	if state == nil {
+		return ErrSessionNotFound
+	}
+
+	// Rename tmux session
+	if err := tmux.RenameSession(actualName, newName); err != nil {
+		return err
+	}
+
+	// Move to new name
+	delete(a.sessions, actualName)
+	state.name = newName
+	a.sessions[newName] = state
+
+	// Update terminal window title if exists
+	if state.window != nil {
+		state.window.SetTitle(newName)
 	}
 
 	return nil
@@ -457,7 +566,7 @@ func (a *App) IsDiscordConnected() bool {
 // AddSession creates a new session, starts it, and creates a terminal window
 // This is the main entry point for adding sessions (both initial and via IPC)
 func (a *App) AddSession(name string, sshHost string) error {
-	// Create and start session (spawns daemon, connects)
+	// Create and start session (creates tmux session, attaches via PTY)
 	_, err := a.NewSession(name, sshHost)
 	if err != nil {
 		return err

@@ -10,6 +10,7 @@ import (
 	"gioui.org/text"
 	"gioui.org/unit"
 
+	"claude-term/src/pty"
 	"claude-term/src/render"
 )
 
@@ -47,7 +48,7 @@ func NewTerminalWindow(application *App, state *SessionState) *TerminalWindow {
 
 	// Set window options
 	win.window.Option(
-		app.Title(state.client.Name()),
+		app.Title(state.name),
 		app.Size(unit.Dp(width), unit.Dp(height)),
 	)
 
@@ -86,7 +87,7 @@ func (w *TerminalWindow) Run() error {
 					newRows := newHeight / cellH
 					if newCols > 0 && newRows > 0 {
 						w.state.screen.Resize(newCols, newRows)
-						w.state.client.Resize(uint16(newCols), uint16(newRows))
+						w.state.pty.Resize(pty.Size{Cols: uint16(newCols), Rows: uint16(newRows)})
 					}
 				}
 			}
@@ -118,5 +119,10 @@ func (w *TerminalWindow) Invalidate() {
 
 // Name returns the session name
 func (w *TerminalWindow) Name() string {
-	return w.state.client.Name()
+	return w.state.name
+}
+
+// SetTitle updates the window title
+func (w *TerminalWindow) SetTitle(title string) {
+	w.window.Option(app.Title(title))
 }

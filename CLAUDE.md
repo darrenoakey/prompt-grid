@@ -13,8 +13,8 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 ## Key Architecture
 
 ### Package Structure
-- `src/session/` - Session daemon (PTY owner), client, protocol
-- `src/pty/` - PTY session management, SSH support (used by session daemon)
+- `src/tmux/` - tmux CLI wrapper (session lifecycle via `tmux -L claude-term`)
+- `src/pty/` - PTY session management (runs `tmux attach` inside a PTY)
 - `src/emulator/` - ANSI parser, screen buffer, scrollback
 - `src/render/` - Renderer interface, Gio renderer, image renderer for PNG
 - `src/gui/` - Gio windows, widgets, control center
@@ -23,41 +23,44 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 - `src/logging/` - JSONL logging with dated directories
 - `src/ipc/` - IPC server/client for session requests
 
-### Session Daemon Architecture (Survives Restart)
-Each terminal session runs in its own daemon process:
+### tmux-Based Session Architecture (Survives Restart)
+Sessions are managed by tmux via a dedicated server (`tmux -L claude-term`):
 - **Main process**: GUI, Discord bot, IPC server
-- **Session daemons**: One per terminal, owns the PTY
+- **tmux server**: Owns all terminal sessions, survives GUI restarts
 
 ```
 Main Process (GUI/Discord/IPC)
     │
-    ├── connects to ──► Session Daemon "Work" (PTY owner)
-    │                   └── /tmp/claude-term-sessions/Work.sock
+    ├── PTY running ──► tmux attach -t "Work"    ──► tmux server
+    │                                                  └── session "Work" (shell)
     │
-    └── connects to ──► Session Daemon "Server" (PTY owner)
-                        └── /tmp/claude-term-sessions/Server.sock
+    └── PTY running ──► tmux attach -t "Server"  ──► tmux server
+                                                       └── session "Server" (shell)
 ```
 
 Key behaviors:
-- Session daemons survive main process restart
-- On startup, main process discovers existing daemons and reconnects
-- Socket files in `/tmp/claude-term-sessions/`
-- Info files (`.json`) store PID and start time for validation
-- History buffer (256KB) replayed on reconnect for screen reconstruction
-- `session.Client` replaces direct PTY access in GUI code
-- Close session = terminate daemon; close window = disconnect (daemon survives)
+- tmux sessions survive main process restart
+- On startup, main process discovers existing tmux sessions via `tmux list-sessions`
+- Each session gets a PTY running `tmux attach-session -t <name>`
+- ANSI parser reads PTY output identically to before -- rendering pipeline unchanged
+- tmux configured to be invisible: status bar off, prefix key disabled, all keybindings unbound
+- Close session = kill tmux session; close window = detach (tmux session survives)
+- SSH sessions: `tmux new-session` with `ssh host` as the initial command
 
-Protocol (`src/session/protocol.go`):
-- `MsgData` (0x01): PTY data bidirectional
-- `MsgResize` (0x02): Terminal resize
-- `MsgInfo` (0x03/0x04): Session metadata
-- `MsgHistory` (0x05): History replay complete marker
-- `MsgClose` (0x06): Terminate session
+tmux wrapper (`src/tmux/tmux.go`):
+- `ServerName()` - realm-aware tmux server name
+- `NewSession(name, sshHost, cols, rows)` - create detached tmux session
+- `AttachArgs(name)` - returns cmd/args for `pty.StartCommand()`
+- `ListSessions()` / `HasSession()` / `KillSession()` / `RenameSession()`
+- `KillServer()` - for test cleanup
+- `GetSocketDir()` - IPC socket directory (realm-aware)
+- `EnsureInstalled()` - check for tmux, brew install if missing
 
-Stale session detection:
-- Check info file PID still running
-- Verify process start time matches
-- Try socket connection with timeout
+### SessionState Fields
+- `pty *pty.Session` - PTY running tmux attach
+- `name string` - session name
+- `sshHost string` - SSH host (empty for local sessions)
+- Accessors: `PTY()`, `Name()`, `IsSSH()`, `SSHHost()`
 
 ### Gio GUI Notes
 - Use `new(app.Window)` then `win.Option()` separately (not `app.NewWindow()`)
@@ -76,6 +79,21 @@ Stale session detection:
 - Light backgrounds get dark text, dark backgrounds get light text
 - Control center tabs match session colors exactly (bg + fg)
 
+### Tab Panel Context Menu
+Right-click anywhere on the left tab panel:
+- **On empty space**: Shows "New Session" only
+- **On a tab**: Shows "New Session", "Rename", "Bring to Front", "Close"
+
+New session auto-naming:
+- Sessions created via context menu get names "Session 1", "Session 2", etc.
+- Uses the lowest available number (if Session 1 and Session 3 exist, next is Session 2)
+
+Rename sessions:
+- Right-click tab → "Rename" opens inline text editor
+- Enter confirms, Escape cancels
+- Updates both control center and terminal window title
+- Arrow keys, Home/End, Delete/Backspace work in rename editor
+
 ### Text Selection
 - Mouse drag selects text (pointer.Press/Drag/Release)
 - Selected cells rendered with inverted fg/bg colors
@@ -88,16 +106,22 @@ Stale session detection:
 - Split bytes across Parse() calls handled correctly
 
 ### Shell Setup
-- Start shell with `-l -i` flags for interactive login shell
-- Loads user's .zshrc/.bashrc for proper prompt
+- tmux runs the user's default shell in each session
+- SSH sessions: tmux runs `ssh host` as the initial command
 
 ### Single Instance Architecture
-- Uses Unix socket at `/tmp/claude-term.sock` for IPC
+- Uses Unix socket at `/tmp/claude-term-sessions/ipc.sock` for IPC
 - First instance becomes primary, listens on socket
 - Subsequent invocations send session request to primary and exit
 - All sessions managed by single app with one control center
 - Daemonization: re-exec with `CLAUDE_TERM_DAEMON=1` env var, parent exits immediately
-- Session daemons spawned with `--session-daemon` flag (internal)
+
+### Scrollback Viewing
+- Mouse wheel scrolls through terminal history
+- `scrollOffset` in SessionState tracks view position (0 = live view)
+- Scroll up = increase offset (view history), scroll down = decrease (toward live)
+- Any new output auto-resets to live view (scrollOffset = 0)
+- Rendering blends scrollback buffer + current screen based on offset
 
 ### Gio Event Handling Gotchas
 - Widget state must persist across frames for events to match targets
@@ -107,6 +131,7 @@ Stale session detection:
 - Right-click: check `e.Buttons.Contain(pointer.ButtonSecondary)` or control+click
 - After state changes, call `window.Invalidate()` to trigger redraw
 - Cross-window operations (e.g., raising another window) must be async via goroutine to avoid deadlock
+- **CRITICAL**: All pointer event types (Press, Drag, Release, Scroll) must be in ONE filter - separate filters don't work
 
 ### Discord Bot
 - Auto-reconnects with exponential backoff (1s to 10 min) on disconnect
@@ -116,4 +141,19 @@ Stale session detection:
 - Logs to `~/.config/claude-term/discord.log`
 
 ## Testing
-90 tests covering emulator, PTY, rendering, session daemon, GUI app logic.
+111 tests covering emulator, PTY, rendering, tmux lifecycle, GUI state/behavior.
+
+### Test Isolation with Realms
+- `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories
+- Tests set unique realm: `test-{pid}-{timestamp}`
+- tmux server: `claude-term-{realm}` (isolated from production)
+- Socket directory: `/tmp/claude-term-{realm}/`
+- Complete isolation from production instance
+- TestMain cleans up via `tmux.KillServer()` and removes realm directory
+
+### TestDriver ("Interfaced User" Pattern)
+Located in `src/gui/testdriver.go`:
+- Input actions: `TypeText`, `SendKeys`, `SendCtrlC`, selection ops
+- Scrollback: `ScrollUp`, `ScrollDown`, `ScrollToTop`, `ScrollToBottom`
+- State queries: `GetScreenContent`, `GetCursorPosition`, `GetScrollOffset`
+- Wait helpers: `WaitForContent`, `WaitForPattern`, `WaitForScrollback`
