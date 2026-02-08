@@ -115,6 +115,13 @@ Rename sessions:
 - Subsequent invocations send session request to primary and exit
 - All sessions managed by single app with one control center
 - Daemonization: re-exec with `CLAUDE_TERM_DAEMON=1` env var, parent exits immediately
+- Single-instance guard: `syscall.Flock` on `/tmp/claude-term-sessions/daemon.lock`
+- **CRITICAL**: `runtime.KeepAlive(lockFile)` required after flock -- Go GC will finalize unreferenced `*os.File`, silently releasing the lock
+
+### Deployment
+- `./run build` outputs to `output/claude-term`
+- `auto` service runs `~/bin/claude-term --daemon` -- must copy binary there after build
+- Deploy: `cp output/claude-term ~/bin/claude-term && ~/bin/auto restart claude-term`
 
 ### Scrollback Viewing
 - Mouse wheel scrolls through terminal history
