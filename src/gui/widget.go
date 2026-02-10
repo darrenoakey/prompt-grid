@@ -354,9 +354,12 @@ func (w *TerminalWidget) renderCell(gtx layout.Context, th *material.Theme, x, y
 	// Check if cell is selected
 	isSelected := w.state.IsSelected(x, y)
 
-	// Get colors
+	// Get colors - adjust indexed (ANSI) colors for contrast against session background
 	fg := cell.FG.ToNRGBA(w.colors.Foreground)
 	bg := cell.BG.ToNRGBA(w.colors.Background)
+	if cell.FG.Type == emulator.ColorIndexed {
+		fg = render.AdjustForContrast(fg, w.colors.Background)
+	}
 
 	// Handle reverse video
 	if cell.Attrs&emulator.AttrReverse != 0 {

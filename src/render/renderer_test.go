@@ -32,6 +32,71 @@ func TestCellStyleFromAttrs(t *testing.T) {
 	}
 }
 
+func TestLuminance(t *testing.T) {
+	black := color.NRGBA{R: 0, G: 0, B: 0, A: 255}
+	white := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+
+	if l := Luminance(black); l != 0 {
+		t.Errorf("Luminance(black) = %f, want 0", l)
+	}
+	if l := Luminance(white); l < 0.99 || l > 1.01 {
+		t.Errorf("Luminance(white) = %f, want ~1.0", l)
+	}
+}
+
+func TestAdjustForContrast(t *testing.T) {
+	lightBg := color.NRGBA{R: 200, G: 220, B: 150, A: 255} // Light green
+	darkBg := color.NRGBA{R: 30, G: 40, B: 20, A: 255}     // Dark green
+
+	// White on light bg should be darkened (insufficient contrast)
+	white := color.NRGBA{R: 229, G: 229, B: 229, A: 255}
+	adjusted := AdjustForContrast(white, lightBg)
+	if adjusted.R >= white.R {
+		t.Errorf("White on light bg should be darkened: got R=%d, was R=%d", adjusted.R, white.R)
+	}
+
+	// Black on light bg should stay (sufficient contrast)
+	black := color.NRGBA{R: 0, G: 0, B: 0, A: 255}
+	adjusted = AdjustForContrast(black, lightBg)
+	if adjusted != black {
+		t.Errorf("Black on light bg should not change: got %v, want %v", adjusted, black)
+	}
+
+	// Black on dark bg should be lightened (insufficient contrast)
+	adjusted = AdjustForContrast(black, darkBg)
+	if adjusted.R <= black.R {
+		t.Errorf("Black on dark bg should be lightened: got R=%d, was R=%d", adjusted.R, black.R)
+	}
+
+	// White on dark bg should stay (sufficient contrast)
+	adjusted = AdjustForContrast(white, darkBg)
+	if adjusted != white {
+		t.Errorf("White on dark bg should not change: got %v, want %v", adjusted, white)
+	}
+}
+
+func TestSessionColorDefaults(t *testing.T) {
+	// Check that light background sessions get pure black foreground
+	// and dark background sessions get pure white foreground
+	for i := 0; i < SessionColorCount(); i++ {
+		sc := GetSessionColor(i)
+		bgLum := Luminance(sc.Background)
+		if bgLum >= 0.5 {
+			// Light background: foreground should be pure black
+			if sc.Foreground.R != 0 || sc.Foreground.G != 0 || sc.Foreground.B != 0 {
+				t.Errorf("Session %d (light bg): foreground = {%d,%d,%d}, want {0,0,0}",
+					i, sc.Foreground.R, sc.Foreground.G, sc.Foreground.B)
+			}
+		} else {
+			// Dark background: foreground should be pure white
+			if sc.Foreground.R != 255 || sc.Foreground.G != 255 || sc.Foreground.B != 255 {
+				t.Errorf("Session %d (dark bg): foreground = {%d,%d,%d}, want {255,255,255}",
+					i, sc.Foreground.R, sc.Foreground.G, sc.Foreground.B)
+			}
+		}
+	}
+}
+
 func TestDefaultColorScheme(t *testing.T) {
 	colors := DefaultColorScheme()
 

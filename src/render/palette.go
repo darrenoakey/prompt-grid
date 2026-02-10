@@ -13,6 +13,57 @@ type SessionColor struct {
 	Cursor     color.NRGBA
 }
 
+// Luminance computes the perceptual luminance of a color (0-1 range)
+func Luminance(c color.NRGBA) float64 {
+	return 0.2126*float64(c.R)/255 + 0.7152*float64(c.G)/255 + 0.0722*float64(c.B)/255
+}
+
+// AdjustForContrast adjusts a foreground color to ensure readability against a background.
+// If the luminance contrast is insufficient (< 0.5), shifts the color toward readable range.
+// Matches terminal_util's ANSI color adjustment algorithm.
+func AdjustForContrast(fg, bg color.NRGBA) color.NRGBA {
+	fgLum := Luminance(fg)
+	bgLum := Luminance(bg)
+
+	if math.Abs(fgLum-bgLum) >= 0.5 {
+		return fg // Already has sufficient contrast
+	}
+
+	// Shift color channels by ~0.3 (77/255) to improve contrast
+	if bgLum < 0.5 {
+		// Dark background: lighten the foreground
+		return color.NRGBA{
+			R: clampAdd(fg.R, 77),
+			G: clampAdd(fg.G, 77),
+			B: clampAdd(fg.B, 77),
+			A: fg.A,
+		}
+	}
+	// Light background: darken the foreground
+	return color.NRGBA{
+		R: clampSub(fg.R, 77),
+		G: clampSub(fg.G, 77),
+		B: clampSub(fg.B, 77),
+		A: fg.A,
+	}
+}
+
+func clampAdd(v, delta uint8) uint8 {
+	sum := int(v) + int(delta)
+	if sum > 255 {
+		return 255
+	}
+	return uint8(sum)
+}
+
+func clampSub(v, delta uint8) uint8 {
+	diff := int(v) - int(delta)
+	if diff < 0 {
+		return 0
+	}
+	return uint8(diff)
+}
+
 // sessionPalette contains 128 pre-generated session colors
 var sessionPalette []SessionColor
 
@@ -47,12 +98,13 @@ func generateSessionPalette(n int) []SessionColor {
 			A: 255,
 		}
 
-		// Text color: white for dark backgrounds, black for light
+		// Text color: pure white for dark backgrounds, pure black for light
+		// (matches terminal_util: NSColor.whiteColor() / NSColor.blackColor())
 		var fg color.NRGBA
 		if value < 0.5 {
-			fg = color.NRGBA{R: 220, G: 220, B: 220, A: 255} // Light gray for dark bg
+			fg = color.NRGBA{R: 255, G: 255, B: 255, A: 255} // White for dark bg
 		} else {
-			fg = color.NRGBA{R: 30, G: 30, B: 30, A: 255} // Dark for light bg
+			fg = color.NRGBA{R: 0, G: 0, B: 0, A: 255} // Black for light bg
 		}
 
 		// Cursor is the same as foreground

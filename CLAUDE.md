@@ -142,6 +142,7 @@ Rename sessions:
 - Cross-window operations (e.g., raising another window) must be async via goroutine to avoid deadlock
 - **CRITICAL**: All pointer event types (Press, Drag, Release, Scroll) must be in ONE filter - separate filters don't work
 - **CRITICAL**: When switching keyboard input between handlers (e.g., rename input vs terminal), explicitly request focus with `gtx.Execute(key.FocusCmd{Tag: target})`. Without it, `key.EditEvent` (typed characters) won't be delivered to the new handler. Also disable competing handlers during the switch to prevent event stealing.
+- **CRITICAL (macOS deadlock)**: NEVER call blocking operations (subprocess, cross-window `window.Option()`) synchronously from within a Gio frame handler. On macOS, the Cocoa main thread blocks while the frame handler runs. If the frame handler calls `window.Option()` on a different window, it dispatches to the Cocoa main thread → deadlock. All context menu actions (New Session, Close, Rename, Bring to Front) run in goroutines for this reason.
 
 ### Discord Bot
 - Auto-reconnects with exponential backoff (1s to 10 min) on disconnect
@@ -161,7 +162,7 @@ Rename sessions:
 - **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/claude-term/memdump-{timestamp}.log`.
 
 ## Testing
-119 tests covering emulator, PTY, rendering, tmux lifecycle, GUI state/behavior, memory watchdog.
+123 tests covering emulator, PTY, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow.
 
 ### Test Isolation with Realms
 - `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories
@@ -177,3 +178,5 @@ Located in `src/gui/testdriver.go`:
 - Scrollback: `ScrollUp`, `ScrollDown`, `ScrollToTop`, `ScrollToBottom`
 - State queries: `GetScreenContent`, `GetCursorPosition`, `GetScrollOffset`
 - Wait helpers: `WaitForContent`, `WaitForPattern`, `WaitForScrollback`
+- Rename: `StartRename`, `TypeInRename`, `ConfirmRename`, `CancelRename`, `IsRenaming`, `GetRenameName`, `GetRenameCursorPos`
+- Control window: `EnsureControlWindow`, `GetControlSelected`, `SetControlSelected`, `WaitForSessionName`
