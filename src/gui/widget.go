@@ -189,9 +189,11 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 	}
 
 	// Process all key events
+	// Tab must be explicitly named — Gio intercepts unnamed Tab as a focus-navigation SystemEvent
 	for {
 		ev, ok := gtx.Event(
 			key.Filter{Optional: key.ModShift | key.ModCtrl | key.ModCommand},
+			key.Filter{Name: key.NameTab},
 		)
 		if !ok {
 			break
