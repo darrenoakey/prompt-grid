@@ -151,9 +151,25 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		}
 	}
 
-	if w.selected == "" && len(sessions) > 0 {
-		w.selected = sessions[0]
-		w.focusTerminal = true
+	// Auto-select first session if nothing selected, or fix stale selection
+	// (e.g., after async rename completes and the old name is gone)
+	if len(sessions) > 0 {
+		if w.selected == "" {
+			w.selected = sessions[0]
+			w.focusTerminal = true
+		} else {
+			found := false
+			for _, s := range sessions {
+				if s == w.selected {
+					found = true
+					break
+				}
+			}
+			if !found {
+				w.selected = sessions[0]
+				w.focusTerminal = true
+			}
+		}
 	}
 
 	// Handle rename keyboard input
@@ -626,23 +642,17 @@ func (w *ControlWindow) cancelRename() {
 	w.focusTerminal = true // Give focus back to terminal widget
 }
 
-// confirmRename applies the rename
+// confirmRename applies the rename asynchronously.
+// RenameSession runs a tmux subprocess and calls SetTitle (window.Option),
+// both of which block/deadlock the Cocoa main thread if called from a frame handler.
 func (w *ControlWindow) confirmRename() {
 	if w.renameState.newName != "" && w.renameState.newName != w.renameState.sessionName {
 		oldName := w.renameState.sessionName
 		newName := w.renameState.newName
-		err := w.app.RenameSession(oldName, newName)
-		if err == nil {
-			// Update selected if we renamed the selected session
-			if w.selected == oldName {
-				w.selected = newName
-			}
-			// Update term widget cache
-			if widget, ok := w.termWidgets[oldName]; ok {
-				delete(w.termWidgets, oldName)
-				w.termWidgets[newName] = widget
-			}
-		}
+		go func() {
+			w.app.RenameSession(oldName, newName)
+			w.window.Invalidate()
+		}()
 	}
 	w.cancelRename()
 }

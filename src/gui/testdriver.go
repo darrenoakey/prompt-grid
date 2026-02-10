@@ -344,6 +344,125 @@ func (d *TestDriver) WaitForScrollback(sessionName string, minLines int, timeout
 	return false
 }
 
+// --- Control Window / Rename Actions ---
+
+// EnsureControlWindow creates the control window if it doesn't exist
+func (d *TestDriver) EnsureControlWindow() {
+	if d.app.controlWin == nil {
+		d.app.CreateControlWindow()
+	}
+}
+
+// StartRename begins renaming a session tab
+func (d *TestDriver) StartRename(sessionName string) {
+	d.EnsureControlWindow()
+	d.app.controlWin.startRename(sessionName)
+}
+
+// IsRenaming returns whether a rename operation is active
+func (d *TestDriver) IsRenaming() bool {
+	if d.app.controlWin == nil {
+		return false
+	}
+	return d.app.controlWin.renameState.active
+}
+
+// GetRenameSessionName returns the session being renamed
+func (d *TestDriver) GetRenameSessionName() string {
+	if d.app.controlWin == nil {
+		return ""
+	}
+	return d.app.controlWin.renameState.sessionName
+}
+
+// GetRenameName returns the current text in the rename input
+func (d *TestDriver) GetRenameName() string {
+	if d.app.controlWin == nil {
+		return ""
+	}
+	return d.app.controlWin.renameState.newName
+}
+
+// GetRenameCursorPos returns the cursor position in the rename input
+func (d *TestDriver) GetRenameCursorPos() int {
+	if d.app.controlWin == nil {
+		return 0
+	}
+	return d.app.controlWin.renameState.cursorPos
+}
+
+// TypeInRename replaces the rename input text
+func (d *TestDriver) TypeInRename(text string) {
+	if d.app.controlWin == nil {
+		return
+	}
+	d.app.controlWin.renameState.newName = text
+	d.app.controlWin.renameState.cursorPos = len(text)
+}
+
+// ConfirmRename confirms the rename (simulates pressing Enter)
+func (d *TestDriver) ConfirmRename() {
+	if d.app.controlWin == nil {
+		return
+	}
+	d.app.controlWin.confirmRename()
+}
+
+// CancelRename cancels the rename (simulates pressing Escape)
+func (d *TestDriver) CancelRename() {
+	if d.app.controlWin == nil {
+		return
+	}
+	d.app.controlWin.cancelRename()
+}
+
+// GetControlSelected returns the currently selected tab in the control window
+func (d *TestDriver) GetControlSelected() string {
+	if d.app.controlWin == nil {
+		return ""
+	}
+	return d.app.controlWin.selected
+}
+
+// SetControlSelected sets the selected tab in the control window
+func (d *TestDriver) SetControlSelected(name string) {
+	d.EnsureControlWindow()
+	d.app.controlWin.selected = name
+}
+
+// WaitForSessionName waits for a session name to appear in the session list
+func (d *TestDriver) WaitForSessionName(name string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, s := range d.app.ListSessions() {
+			if s == name {
+				return true
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// WaitForSessionNameGone waits for a session name to disappear from the session list
+func (d *TestDriver) WaitForSessionNameGone(name string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		found := false
+		for _, s := range d.app.ListSessions() {
+			if s == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
 // --- Scrollback Content Queries ---
 
 // GetScrollbackLine returns a line from scrollback (0 = oldest)

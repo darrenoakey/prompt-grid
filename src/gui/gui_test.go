@@ -393,6 +393,207 @@ func TestWaitForPattern(t *testing.T) {
 
 // --- Cell Attribute Tests ---
 
+// --- Rename Tests (BDD-style using TestDriver) ---
+
+func TestRenameCancelPreservesOriginalName(t *testing.T) {
+	app := NewApp()
+	driver := NewTestDriver(app)
+
+	// Given: I have an open control center with two sessions
+	err := driver.CreateSession("session1")
+	if err != nil {
+		t.Fatalf("CreateSession(session1) error = %v", err)
+	}
+	defer driver.CloseSession("session1")
+
+	err = driver.CreateSession("session2")
+	if err != nil {
+		t.Fatalf("CreateSession(session2) error = %v", err)
+	}
+	defer driver.CloseSession("session2")
+
+	driver.EnsureControlWindow()
+
+	// When: I right-click on session1 and select rename
+	driver.StartRename("session1")
+
+	// Then: the cursor should be in an edit box at the end of "session1"
+	if !driver.IsRenaming() {
+		t.Fatal("Expected rename to be active")
+	}
+	if name := driver.GetRenameName(); name != "session1" {
+		t.Errorf("Rename input = %q, want %q", name, "session1")
+	}
+	if pos := driver.GetRenameCursorPos(); pos != len("session1") {
+		t.Errorf("Cursor position = %d, want %d", pos, len("session1"))
+	}
+
+	// When: I change the name to "bob"
+	driver.TypeInRename("bob")
+
+	if name := driver.GetRenameName(); name != "bob" {
+		t.Errorf("After typing, rename input = %q, want %q", name, "bob")
+	}
+
+	// When: I press escape
+	driver.CancelRename()
+
+	// Then: rename should be cancelled
+	if driver.IsRenaming() {
+		t.Error("Rename should not be active after cancel")
+	}
+
+	// Then: there should be two sessions with original names (escape cancels)
+	sessions := driver.ListSessions()
+	if len(sessions) != 2 {
+		t.Fatalf("Expected 2 sessions, got %d: %v", len(sessions), sessions)
+	}
+	hasSession1, hasSession2 := false, false
+	for _, name := range sessions {
+		if name == "session1" {
+			hasSession1 = true
+		}
+		if name == "session2" {
+			hasSession2 = true
+		}
+	}
+	if !hasSession1 || !hasSession2 {
+		t.Errorf("Expected sessions [session1, session2], got %v", sessions)
+	}
+}
+
+func TestRenameConfirmChangesName(t *testing.T) {
+	app := NewApp()
+	driver := NewTestDriver(app)
+
+	// Given: I have an open control center with two sessions
+	err := driver.CreateSession("session1")
+	if err != nil {
+		t.Fatalf("CreateSession(session1) error = %v", err)
+	}
+
+	err = driver.CreateSession("session2")
+	if err != nil {
+		t.Fatalf("CreateSession(session2) error = %v", err)
+	}
+	defer driver.CloseSession("session2")
+
+	driver.EnsureControlWindow()
+
+	// When: I right-click on session1 and select rename
+	driver.StartRename("session1")
+
+	// Then: rename should be active with session1's name
+	if !driver.IsRenaming() {
+		t.Fatal("Expected rename to be active")
+	}
+	if name := driver.GetRenameSessionName(); name != "session1" {
+		t.Errorf("Rename session = %q, want %q", name, "session1")
+	}
+
+	// When: I change the name to "bob"
+	driver.TypeInRename("bob")
+
+	// When: I press enter (confirm)
+	driver.ConfirmRename()
+
+	// Then: rename should be deactivated
+	if driver.IsRenaming() {
+		t.Error("Rename should not be active after confirm")
+	}
+
+	// Then: wait for async rename to complete
+	if !driver.WaitForSessionName("bob", 5*time.Second) {
+		t.Fatal("Session 'bob' did not appear after rename")
+	}
+
+	// Then: there should be two sessions, bob and session2
+	sessions := driver.ListSessions()
+	hasBob, hasSession2 := false, false
+	for _, name := range sessions {
+		if name == "bob" {
+			hasBob = true
+		}
+		if name == "session2" {
+			hasSession2 = true
+		}
+	}
+	if !hasBob || !hasSession2 {
+		t.Errorf("Expected sessions [bob, session2], got %v", sessions)
+	}
+
+	// Verify old name is gone
+	if driver.WaitForSessionName("session1", 100*time.Millisecond) {
+		t.Error("Session 'session1' should not exist after rename")
+	}
+
+	// Cleanup
+	driver.CloseSession("bob")
+}
+
+func TestRenameNoChangeIsNoop(t *testing.T) {
+	app := NewApp()
+	driver := NewTestDriver(app)
+
+	// Given: a session
+	err := driver.CreateSession("unchanged")
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	defer driver.CloseSession("unchanged")
+
+	driver.EnsureControlWindow()
+
+	// When: I start rename but don't change the name and press enter
+	driver.StartRename("unchanged")
+	driver.ConfirmRename()
+
+	// Then: session name should be unchanged
+	sessions := driver.ListSessions()
+	found := false
+	for _, name := range sessions {
+		if name == "unchanged" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Session 'unchanged' should still exist, got %v", sessions)
+	}
+}
+
+func TestRenameEmptyNameIsNoop(t *testing.T) {
+	app := NewApp()
+	driver := NewTestDriver(app)
+
+	// Given: a session
+	err := driver.CreateSession("notempty")
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	defer driver.CloseSession("notempty")
+
+	driver.EnsureControlWindow()
+
+	// When: I start rename, clear the name, and press enter
+	driver.StartRename("notempty")
+	driver.TypeInRename("")
+	driver.ConfirmRename()
+
+	// Then: session should keep its original name
+	sessions := driver.ListSessions()
+	found := false
+	for _, name := range sessions {
+		if name == "notempty" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Session 'notempty' should still exist after empty rename, got %v", sessions)
+	}
+}
+
+// --- Cell Attribute Tests ---
+
 func TestCellAttributes(t *testing.T) {
 	app := NewApp()
 	driver := NewTestDriver(app)
