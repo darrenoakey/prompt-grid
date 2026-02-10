@@ -22,6 +22,7 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 - `src/config/` - Config loading, keyring access
 - `src/logging/` - JSONL logging with dated directories
 - `src/ipc/` - IPC server/client for session requests
+- `src/memwatch/` - Memory watchdog (2GB crash with diagnostic dump)
 
 ### tmux-Based Session Architecture (Survives Restart)
 Sessions are managed by tmux via a dedicated server (`tmux -L claude-term`):
@@ -149,8 +150,18 @@ Rename sessions:
 - Token stored in macOS keyring (`claude-term/discord_bot_token`)
 - Logs to `~/.config/claude-term/discord.log`
 
+### Memory Safeguards
+- **Scrollback cap**: 100K lines per session, oldest chunks trimmed (`src/emulator/scrollback.go`)
+- **Parser caps**: intermediate string (64B), OSC string (64KB) — resets to ground on overflow
+- **PTY readLoop**: passes `buf[:n]` directly to parser (no per-read allocation)
+- **Gio themes**: `material.NewTheme()` called once at construction, stored as persistent field on ControlWindow and TerminalWidget — NOT per-frame
+- **Discord streamer**: `lastScreenshot` nilled after send to release PNG bytes
+- **IPC server**: 5s deadline on connections to prevent hung goroutines
+- **termWidgets cleanup**: stale entries cleaned alongside tabStates in control window layout
+- **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/claude-term/memdump-{timestamp}.log`.
+
 ## Testing
-111 tests covering emulator, PTY, rendering, tmux lifecycle, GUI state/behavior.
+119 tests covering emulator, PTY, rendering, tmux lifecycle, GUI state/behavior, memory watchdog.
 
 ### Test Isolation with Realms
 - `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories
