@@ -69,7 +69,7 @@ tmux wrapper (`src/tmux/tmux.go`):
 - Font loading: `text.NewShaper(text.WithCollection(collection))` - allows system font fallback for unicode
 - Embedded fonts via `//go:embed fonts/*.ttf`
 - `app.Position` doesn't exist - windows stack by default
-- Keyboard: `key.Filter{Optional: key.ModShift|key.ModCtrl|key.ModCommand}` for all keys
+- Keyboard: `key.Filter{Optional: key.ModShift|key.ModCtrl|key.ModCommand}` for all keys — but Tab requires explicit `key.Filter{Name: key.NameTab}` (see gotcha below)
 - Handle both `key.Event` and `key.EditEvent` - EditEvent has proper text, Event has key names
 - Key names are uppercase (e.g., "A" for 'a' key) - must handle shift for proper case
 - Clipboard: `clipboard.WriteCmd`/`clipboard.ReadCmd` with `transfer.TargetFilter` for paste events
@@ -78,7 +78,8 @@ tmux wrapper (`src/tmux/tmux.go`):
 ### Session Colors
 - 128 pre-generated colors in HSV space (render/palette.go)
 - Each session gets random color assignment
-- Light backgrounds get dark text, dark backgrounds get light text
+- Light backgrounds get pure black text, dark backgrounds get pure white text
+- ANSI indexed colors adjusted for contrast via `AdjustForContrast()` (luminance threshold 0.5, shift ±77/255)
 - Control center tabs match session colors exactly (bg + fg)
 
 ### Tab Panel Context Menu
@@ -142,6 +143,7 @@ Rename sessions:
 - Cross-window operations (e.g., raising another window) must be async via goroutine to avoid deadlock
 - **CRITICAL**: All pointer event types (Press, Drag, Release, Scroll) must be in ONE filter - separate filters don't work
 - **CRITICAL**: When switching keyboard input between handlers (e.g., rename input vs terminal), explicitly request focus with `gtx.Execute(key.FocusCmd{Tag: target})`. Without it, `key.EditEvent` (typed characters) won't be delivered to the new handler. Also disable competing handlers during the switch to prevent event stealing.
+- **CRITICAL (Tab key)**: Gio intercepts Tab as a `SystemEvent` for focus navigation. Catch-all `key.Filter` (empty `Name`) skips SystemEvents. To receive Tab in a terminal widget, add an explicit `key.Filter{Name: key.NameTab}` alongside the catch-all filter. Without this, Tab is consumed by Gio and never reaches the widget's event handler.
 - **CRITICAL (macOS deadlock)**: NEVER call blocking operations (subprocess, cross-window `window.Option()`) synchronously from within a Gio frame handler. On macOS, the Cocoa main thread blocks while the frame handler runs. If the frame handler calls `window.Option()` on a different window, it dispatches to the Cocoa main thread → deadlock. All context menu actions (New Session, Close, Rename, Bring to Front) run in goroutines for this reason.
 
 ### Discord Bot
@@ -162,7 +164,7 @@ Rename sessions:
 - **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/claude-term/memdump-{timestamp}.log`.
 
 ## Testing
-123 tests covering emulator, PTY, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow.
+126 tests covering emulator, PTY, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast.
 
 ### Test Isolation with Realms
 - `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories
