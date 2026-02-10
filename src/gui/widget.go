@@ -104,9 +104,15 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 
 	// Process pointer events for selection and scrolling
 	// All pointer event types must be in a single filter
+	// ScrollY bounds are REQUIRED — without them Gio rejects all scroll events
+	scrollMax := w.state.scrollback.Count()
 	for {
 		ev, ok := gtx.Event(
-			pointer.Filter{Target: w, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll},
+			pointer.Filter{
+				Target:  w,
+				Kinds:   pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll,
+				ScrollY: pointer.ScrollRange{Min: -scrollMax, Max: scrollMax},
+			},
 		)
 		if !ok {
 			break
