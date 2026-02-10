@@ -474,10 +474,10 @@ func (a *App) CloseSession(name string) error {
 // RenameSession renames a session
 func (a *App) RenameSession(oldName, newName string) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 
 	// Check if new name already exists
 	if _, exists := a.sessions[newName]; exists {
+		a.mu.Unlock()
 		return fmt.Errorf("session %q already exists", newName)
 	}
 
@@ -493,11 +493,13 @@ func (a *App) RenameSession(oldName, newName string) error {
 
 	state := a.sessions[actualName]
 	if state == nil {
+		a.mu.Unlock()
 		return ErrSessionNotFound
 	}
 
-	// Rename tmux session
+	// Rename tmux session (subprocess — safe under lock, no main-thread dispatch)
 	if err := tmux.RenameSession(actualName, newName); err != nil {
+		a.mu.Unlock()
 		return err
 	}
 
@@ -506,9 +508,16 @@ func (a *App) RenameSession(oldName, newName string) error {
 	state.name = newName
 	a.sessions[newName] = state
 
-	// Update terminal window title if exists
-	if state.window != nil {
-		state.window.SetTitle(newName)
+	// Capture window ref before releasing lock
+	win := state.window
+	a.mu.Unlock()
+
+	// Update terminal window title OUTSIDE the lock.
+	// SetTitle calls window.Option() which dispatches to the Cocoa main thread.
+	// If we held a.mu.Lock() here, any frame handler calling a.mu.RLock() would
+	// deadlock (goroutine waits for main thread, main thread waits for lock).
+	if win != nil {
+		win.SetTitle(newName)
 	}
 
 	return nil
