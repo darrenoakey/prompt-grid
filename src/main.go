@@ -15,6 +15,7 @@ import (
 	"claude-term/src/discord"
 	"claude-term/src/gui"
 	"claude-term/src/ipc"
+	"claude-term/src/memwatch"
 	"claude-term/src/tmux"
 )
 
@@ -193,6 +194,17 @@ func runDaemon() {
 	if bot != nil {
 		application.SetDiscordBot(bot)
 	}
+
+	// Start memory watchdog (monitors heap, crashes at 2GB with dump)
+	memwatch.Start(func() map[string]int {
+		result := make(map[string]int)
+		for _, name := range application.ListSessions() {
+			if state := application.GetSession(name); state != nil {
+				result[name] = state.Scrollback().Count()
+			}
+		}
+		return result
+	})
 
 	// Create and run control window in background
 	// The daemon stays running even if control window is closed

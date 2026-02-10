@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"os"
 	"strconv"
 	"strings"
 
@@ -30,6 +31,7 @@ type ControlWindow struct {
 	app            *App
 	window         *app.Window
 	shaper         *text.Shaper
+	theme          *material.Theme            // Persistent theme (avoids per-frame allocation)
 	ops            op.Ops
 	selected       string
 	tabStates      map[string]*tabState       // Persistent tab states keyed by name
@@ -37,6 +39,7 @@ type ControlWindow struct {
 	contextMenu    *contextMenuState          // Right-click context menu
 	tabPanelBg     *tabPanelBackground        // For right-click on empty tab area
 	renameState    *renameState               // For renaming sessions
+	focusTerminal  bool                       // One-shot: request focus for terminal widget next frame
 }
 
 // tabPanelBackground is a persistent target for right-click on empty tab area
@@ -87,16 +90,23 @@ func NewControlWindow(application *App) *ControlWindow {
 	)
 
 	win.shaper = text.NewShaper(text.WithCollection(render.CreateFontCollection()))
+	win.theme = material.NewTheme()
+	win.theme.Shaper = win.shaper
 	return win
 }
 
 // Run starts the control window event loop
 func (w *ControlWindow) Run() error {
+	var frameCount int
 	for {
 		switch e := w.window.Event().(type) {
 		case app.DestroyEvent:
 			return e.Err
 		case app.FrameEvent:
+			frameCount++
+			if frameCount%10000 == 0 {
+				fmt.Fprintf(os.Stderr, "DIAG: control window frame %d\n", frameCount)
+			}
 			gtx := app.NewContext(&w.ops, e)
 			w.layout(gtx)
 			e.Frame(gtx.Ops)
@@ -115,7 +125,7 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		}
 	}
 
-	// Clean up stale tab states
+	// Clean up stale tab states and term widgets
 	for name := range w.tabStates {
 		found := false
 		for _, s := range sessions {
@@ -128,9 +138,22 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 			delete(w.tabStates, name)
 		}
 	}
+	for name := range w.termWidgets {
+		found := false
+		for _, s := range sessions {
+			if s == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			delete(w.termWidgets, name)
+		}
+	}
 
 	if w.selected == "" && len(sessions) > 0 {
 		w.selected = sessions[0]
+		w.focusTerminal = true
 	}
 
 	// Handle rename keyboard input
@@ -268,9 +291,7 @@ func (w *ControlWindow) layoutDiscordStatus(gtx layout.Context, height int) {
 	paint.FillShape(gtx.Ops, statusColor, circleRect)
 
 	// Status text
-	th := material.NewTheme()
-	th.Shaper = w.shaper
-	label := material.Label(th, unit.Sp(11), statusText)
+	label := material.Label(w.theme, unit.Sp(11), statusText)
 	label.Color = color.NRGBA{R: 160, G: 160, B: 160, A: 255}
 
 	textStack := op.Offset(image.Pt(circleX+circleRadius+8, 8)).Push(gtx.Ops)
@@ -327,8 +348,9 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int
 						// Right-click - show context menu
 						w.showContextMenu(tab.name, image.Point{X: int(e.Position.X), Y: offsetY + int(e.Position.Y)})
 					} else {
-						// Left-click - select tab
+						// Left-click - select tab and focus terminal
 						w.selected = tab.name
+						w.focusTerminal = true
 						w.contextMenu.visible = false // Close context menu on left click
 					}
 				}
@@ -353,15 +375,12 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int
 	}
 
 	// Draw tab name or rename input
-	th := material.NewTheme()
-	th.Shaper = w.shaper
-
 	if isRenaming {
 		// Draw rename input field
 		w.layoutRenameInput(gtx, sessionFg, height)
 	} else {
 		// Draw normal tab name
-		label := material.Label(th, unit.Sp(14), tab.name)
+		label := material.Label(w.theme, unit.Sp(14), tab.name)
 		label.Color = sessionFg
 
 		// Position label with padding
@@ -399,9 +418,7 @@ func (w *ControlWindow) layoutRenameInput(gtx layout.Context, fg color.NRGBA, he
 	}
 
 	// Draw text
-	th := material.NewTheme()
-	th.Shaper = w.shaper
-	label := material.Label(th, unit.Sp(14), w.renameState.newName)
+	label := material.Label(w.theme, unit.Sp(14), w.renameState.newName)
 	label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
 	stack := op.Offset(image.Pt(12, 10)).Push(gtx.Ops)
@@ -457,9 +474,10 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 		w.termWidgets[w.selected] = widget
 	}
 
-	// Handle keyboard input for the terminal (skip during rename to avoid stealing key events)
-	if !w.renameState.active {
-		w.handleTerminalInput(gtx, state)
+	// Give keyboard focus to the terminal widget (one-shot, not every frame)
+	if w.focusTerminal && !w.renameState.active {
+		gtx.Execute(key.FocusCmd{Tag: widget})
+		w.focusTerminal = false
 	}
 
 	// Add padding around terminal
@@ -475,90 +493,6 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 	return layout.Dimensions{Size: gtx.Constraints.Max}
 }
 
-func (w *ControlWindow) handleTerminalInput(gtx layout.Context, state *SessionState) {
-	// Request keyboard focus for terminal area
-	areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
-	event.Op(gtx.Ops, state)
-
-	// Process all key events
-	for {
-		ev, ok := gtx.Event(
-			key.Filter{Optional: key.ModShift | key.ModCtrl},
-		)
-		if !ok {
-			break
-		}
-		switch e := ev.(type) {
-		case key.EditEvent:
-			if len(e.Text) > 0 {
-				state.pty.Write([]byte(e.Text))
-			}
-		case key.Event:
-			if e.State == key.Press {
-				w.handleKeyEvent(state, e)
-			}
-		}
-	}
-	areaStack.Pop()
-}
-
-func (w *ControlWindow) handleKeyEvent(state *SessionState, e key.Event) {
-	var data []byte
-
-	switch e.Name {
-	case key.NameReturn, key.NameEnter:
-		data = []byte{'\r'}
-	case key.NameDeleteBackward:
-		data = []byte{0x7f}
-	case key.NameTab:
-		data = []byte{'\t'}
-	case key.NameEscape:
-		data = []byte{0x1b}
-	case key.NameUpArrow:
-		data = []byte{0x1b, '[', 'A'}
-	case key.NameDownArrow:
-		data = []byte{0x1b, '[', 'B'}
-	case key.NameRightArrow:
-		data = []byte{0x1b, '[', 'C'}
-	case key.NameLeftArrow:
-		data = []byte{0x1b, '[', 'D'}
-	case key.NameHome:
-		data = []byte{0x1b, '[', 'H'}
-	case key.NameEnd:
-		data = []byte{0x1b, '[', 'F'}
-	case key.NamePageUp:
-		data = []byte{0x1b, '[', '5', '~'}
-	case key.NamePageDown:
-		data = []byte{0x1b, '[', '6', '~'}
-	case key.NameDeleteForward:
-		data = []byte{0x1b, '[', '3', '~'}
-	case key.NameSpace:
-		data = []byte{' '}
-	default:
-		if len(e.Name) == 1 {
-			ch := e.Name[0]
-			if e.Modifiers.Contain(key.ModCtrl) {
-				if ch >= 'A' && ch <= 'Z' {
-					data = []byte{ch - 'A' + 1}
-				} else if ch >= 'a' && ch <= 'z' {
-					data = []byte{ch - 'a' + 1}
-				}
-			} else if e.Modifiers.Contain(key.ModShift) {
-				data = []byte{shiftChar(ch)}
-			} else {
-				if ch >= 'A' && ch <= 'Z' {
-					data = []byte{ch + 32}
-				} else {
-					data = []byte{ch}
-				}
-			}
-		}
-	}
-
-	if len(data) > 0 {
-		state.pty.Write(data)
-	}
-}
 
 func shiftChar(ch byte) byte {
 	if ch >= 'A' && ch <= 'Z' {
@@ -600,6 +534,7 @@ func (w *ControlWindow) showContextMenu(sessionName string, pos image.Point) {
 				err := w.app.AddSession(newName, "")
 				if err == nil {
 					w.selected = newName
+					w.focusTerminal = true
 					w.window.Invalidate()
 				}
 			}()
@@ -674,11 +609,21 @@ func (w *ControlWindow) startRename(sessionName string) {
 	w.renameState.cursorPos = len(sessionName)
 }
 
+// insertRenameChar inserts text at the current cursor position during rename
+func (w *ControlWindow) insertRenameChar(text string) {
+	before := w.renameState.newName[:w.renameState.cursorPos]
+	after := w.renameState.newName[w.renameState.cursorPos:]
+	w.renameState.newName = before + text + after
+	w.renameState.cursorPos += len(text)
+}
+
 // cancelRename cancels the rename operation
 func (w *ControlWindow) cancelRename() {
 	w.renameState.active = false
 	w.renameState.sessionName = ""
 	w.renameState.newName = ""
+	w.renameState.cursorPos = 0
+	w.focusTerminal = true // Give focus back to terminal widget
 }
 
 // confirmRename applies the rename
@@ -759,6 +704,23 @@ func (w *ControlWindow) handleRenameInput(gtx layout.Context) {
 					w.renameState.cursorPos = 0
 				case key.NameEnd:
 					w.renameState.cursorPos = len(w.renameState.newName)
+				case key.NameSpace:
+					w.insertRenameChar(" ")
+				default:
+					// Handle regular character input via key.Event
+					// (key.EditEvent may not be delivered depending on focus)
+					if len(e.Name) == 1 {
+						ch := e.Name[0]
+						var text string
+						if e.Modifiers.Contain(key.ModShift) {
+							text = string(rune(shiftChar(ch)))
+						} else if ch >= 'A' && ch <= 'Z' {
+							text = string(rune(ch + 32))
+						} else {
+							text = string(rune(ch))
+						}
+						w.insertRenameChar(text)
+					}
 				}
 			}
 		}
@@ -847,9 +809,7 @@ func (w *ControlWindow) layoutContextMenu(gtx layout.Context) {
 		}
 
 		// Draw item label
-		th := material.NewTheme()
-		th.Shaper = w.shaper
-		label := material.Label(th, unit.Sp(13), item.label)
+		label := material.Label(w.theme, unit.Sp(13), item.label)
 		if item.hovered {
 			label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 		} else {

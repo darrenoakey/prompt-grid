@@ -102,6 +102,77 @@ func TestScrollbackChunking(t *testing.T) {
 	}
 }
 
+func TestScrollbackMaxLinesCap(t *testing.T) {
+	sb := NewScrollback()
+
+	// Push more than maxLines to trigger trimming
+	// Use 2 chunks beyond maxLines to force trim
+	total := maxLines + chunkSize*2
+	for i := 0; i < total; i++ {
+		sb.Push([]Cell{{Rune: rune('A' + (i % 26))}})
+	}
+
+	if sb.Count() > maxLines {
+		t.Errorf("Count() = %d, exceeds maxLines (%d)", sb.Count(), maxLines)
+	}
+
+	// Should still be able to access the remaining lines
+	last := sb.Line(sb.Count() - 1)
+	if last == nil {
+		t.Fatal("last line should not be nil")
+	}
+}
+
+func TestScrollbackMemoryBytes(t *testing.T) {
+	sb := NewScrollback()
+
+	// Empty scrollback
+	if sb.MemoryBytes() != 0 {
+		t.Errorf("MemoryBytes() = %d for empty scrollback, want 0", sb.MemoryBytes())
+	}
+
+	// Add some lines
+	for i := 0; i < 100; i++ {
+		sb.Push([]Cell{{Rune: 'A'}, {Rune: 'B'}, {Rune: 'C'}})
+	}
+
+	mem := sb.MemoryBytes()
+	if mem == 0 {
+		t.Error("MemoryBytes() should be non-zero after adding lines")
+	}
+
+	// Verify rough correctness: 100 lines * 3 cells each
+	// Cell is at least 4 bytes (rune) + color fields
+	if mem < 100*3*4 {
+		t.Errorf("MemoryBytes() = %d, seems too low for 300 cells", mem)
+	}
+}
+
+func TestScrollbackTrimPreservesRecentLines(t *testing.T) {
+	sb := NewScrollback()
+
+	// Push exactly maxLines + chunkSize lines
+	total := maxLines + chunkSize
+	for i := 0; i < total; i++ {
+		sb.Push([]Cell{{Rune: rune(i)}})
+	}
+
+	// After trim, the oldest chunk(s) should have been removed
+	// Count should be <= maxLines
+	if sb.Count() > maxLines {
+		t.Errorf("Count() = %d, want <= %d", sb.Count(), maxLines)
+	}
+
+	// The most recent line should still be accessible
+	last := sb.Line(sb.Count() - 1)
+	if last == nil {
+		t.Fatal("last line should be accessible after trim")
+	}
+	if last[0].Rune != rune(total-1) {
+		t.Errorf("last line rune = %d, want %d", last[0].Rune, total-1)
+	}
+}
+
 func TestScrollbackDataIsolation(t *testing.T) {
 	sb := NewScrollback()
 

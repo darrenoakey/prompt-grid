@@ -196,9 +196,9 @@ func (s *Session) readLoop() {
 			onData := s.onData
 			s.mu.RUnlock()
 			if onData != nil {
-				data := make([]byte, n)
-				copy(data, buf[:n])
-				onData(data)
+				// Pass buf slice directly - parser processes bytes inline
+				// so no copy is needed (onData is synchronous within the callback)
+				onData(buf[:n])
 			}
 		}
 	}

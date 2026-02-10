@@ -1,8 +1,11 @@
 package emulator
 
-const chunkSize = 1024 // Lines per chunk
+import "unsafe"
 
-// Scrollback manages unlimited scrollback history using chunked storage
+const chunkSize = 1024   // Lines per chunk
+const maxLines = 100_000 // Maximum scrollback lines per session (~100 chunks)
+
+// Scrollback manages scrollback history using chunked storage, capped at maxLines
 type Scrollback struct {
 	chunks [][][]Cell // Each chunk holds up to chunkSize lines
 	count  int        // Total number of lines
@@ -33,6 +36,39 @@ func (s *Scrollback) Push(lines ...[]Cell) {
 		s.chunks[chunkIdx] = append(s.chunks[chunkIdx], lineCopy)
 		s.count++
 	}
+
+	// Trim oldest chunks if over the cap
+	s.trim()
+}
+
+// trim drops oldest chunks to keep count <= maxLines
+func (s *Scrollback) trim() {
+	if s.count <= maxLines {
+		return
+	}
+
+	// Calculate how many full chunks to drop
+	excess := s.count - maxLines
+	chunksToDrop := excess / chunkSize
+	if chunksToDrop == 0 {
+		return
+	}
+
+	// Drop oldest chunks
+	s.chunks = s.chunks[chunksToDrop:]
+	s.count -= chunksToDrop * chunkSize
+}
+
+// MemoryBytes estimates the memory usage of the scrollback buffer
+func (s *Scrollback) MemoryBytes() int {
+	cellSize := int(unsafe.Sizeof(Cell{}))
+	total := 0
+	for _, chunk := range s.chunks {
+		for _, line := range chunk {
+			total += len(line) * cellSize
+		}
+	}
+	return total
 }
 
 // Count returns the number of lines in scrollback

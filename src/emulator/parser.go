@@ -6,6 +6,11 @@ import (
 	"unicode/utf8"
 )
 
+const (
+	maxIntermediateLen = 64      // Cap intermediate string at 64 bytes
+	maxOSCStringLen    = 64 * 1024 // Cap OSC string at 64KB
+)
+
 // ParserState represents the parser state machine state
 type ParserState uint8
 
@@ -226,6 +231,11 @@ func (p *Parser) parseEscape(b byte) {
 
 func (p *Parser) parseEscapeIntermediate(b byte) {
 	if b >= 0x20 && b <= 0x2f {
+		if len(p.intermediate) >= maxIntermediateLen {
+			p.intermediate = ""
+			p.state = StateGround
+			return
+		}
 		p.intermediate += string(b)
 	} else if b >= 0x30 && b <= 0x7e {
 		// Final byte - handle sequence
@@ -272,6 +282,11 @@ func (p *Parser) parseCSIParam(b byte) {
 		}
 		p.params = append(p.params, 0)
 	} else if b >= 0x20 && b <= 0x2f {
+		if len(p.intermediate) >= maxIntermediateLen {
+			p.intermediate = ""
+			p.state = StateGround
+			return
+		}
 		p.intermediate += string(b)
 		p.state = StateCSIIntermediate
 	} else if b >= 0x40 && b <= 0x7e {
@@ -284,6 +299,11 @@ func (p *Parser) parseCSIParam(b byte) {
 
 func (p *Parser) parseCSIIntermediate(b byte) {
 	if b >= 0x20 && b <= 0x2f {
+		if len(p.intermediate) >= maxIntermediateLen {
+			p.intermediate = ""
+			p.state = StateGround
+			return
+		}
 		p.intermediate += string(b)
 	} else if b >= 0x40 && b <= 0x7e {
 		p.executeCSI(b)
@@ -319,6 +339,11 @@ func (p *Parser) parseOSCString(b byte) {
 		p.state = StateEscape
 		p.executeOSC()
 	} else {
+		if p.oscString.Len() >= maxOSCStringLen {
+			p.oscString.Reset()
+			p.state = StateGround
+			return
+		}
 		p.oscString.WriteByte(b)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"claude-term/src/tmux"
 )
@@ -106,6 +107,9 @@ func (s *Server) Run() {
 
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
+
+	// Prevent hung connections from leaking goroutines
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	// Read request
 	reader := bufio.NewReader(conn)

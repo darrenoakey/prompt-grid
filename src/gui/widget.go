@@ -30,6 +30,7 @@ type TerminalWidget struct {
 	colors   render.SessionColor
 	fontSize unit.Sp
 	shaper   *text.Shaper
+	theme    *material.Theme // Persistent theme (avoids per-frame allocation)
 	cellW    int
 	cellH    int
 	focused  bool
@@ -41,11 +42,15 @@ func NewTerminalWidget(state *SessionState, colors render.SessionColor, fontSize
 	cellH := int(float32(fontSize) * 1.5)
 	cellW := int(float32(fontSize) * 0.6)
 
+	th := material.NewTheme()
+	th.Shaper = shaper
+
 	return &TerminalWidget{
 		state:    state,
 		colors:   colors,
 		fontSize: fontSize,
 		shaper:   shaper,
+		theme:    th,
 		cellW:    cellW,
 		cellH:    cellH,
 		focused:  true, // Terminal widget is focused by default
@@ -313,10 +318,6 @@ func (w *TerminalWidget) renderCells(gtx layout.Context) {
 	scrollOffset := w.state.ScrollOffset()
 	scrollbackCount := scrollback.Count()
 
-	// Create a theme for text rendering
-	th := material.NewTheme()
-	th.Shaper = w.shaper
-
 	for y := 0; y < rows; y++ {
 		// Calculate which line to display at screen row y
 		// When scrollOffset=0, we show the current screen (scrollbackCount + y maps to screen line y)
@@ -341,7 +342,7 @@ func (w *TerminalWidget) renderCells(gtx layout.Context) {
 					cell = screen.Cell(x, screenY)
 				}
 			}
-			w.renderCell(gtx, th, x, y, cell)
+			w.renderCell(gtx, w.theme, x, y, cell)
 		}
 	}
 }

@@ -1,6 +1,8 @@
 package gui
 
 import (
+	"fmt"
+	"os"
 	"sync/atomic"
 
 	"gioui.org/app"
@@ -62,6 +64,7 @@ func NewTerminalWindow(application *App, state *SessionState) *TerminalWindow {
 // Run starts the window event loop
 func (w *TerminalWindow) Run() error {
 	var lastWidth, lastHeight int
+	var frameCount int
 
 	for {
 		switch e := w.window.Event().(type) {
@@ -69,6 +72,10 @@ func (w *TerminalWindow) Run() error {
 			atomic.AddInt32(&windowCount, -1)
 			return e.Err
 		case app.FrameEvent:
+			frameCount++
+			if frameCount%10000 == 0 {
+				fmt.Fprintf(os.Stderr, "DIAG: terminal window %q frame %d\n", w.state.name, frameCount)
+			}
 			gtx := app.NewContext(&w.ops, e)
 
 			// Handle resize - calculate new terminal dimensions
