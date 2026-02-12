@@ -169,7 +169,7 @@ Rename sessions:
 - **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/claude-term/memdump-{timestamp}.log`.
 
 ## Testing
-129 tests covering emulator, PTY, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence.
+132 tests covering emulator, PTY, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes.
 
 ### Test Isolation with Realms
 - `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories
@@ -178,6 +178,7 @@ Rename sessions:
 - Socket directory: `/tmp/claude-term-{realm}/`
 - Complete isolation from production instance
 - TestMain cleans up via `tmux.KillServer()` and removes realm directory
+- **CRITICAL**: TestMain sets `HOME` to temp dir and `SHELL=/bin/bash` to avoid user's slow shell init files (.zshrc/.bashrc) blocking tmux sessions. Without this, the shell inside tmux never becomes interactive during tests.
 
 ### TestDriver ("Interfaced User" Pattern)
 Located in `src/gui/testdriver.go`:
@@ -187,3 +188,4 @@ Located in `src/gui/testdriver.go`:
 - Wait helpers: `WaitForContent`, `WaitForPattern`, `WaitForScrollback`
 - Rename: `StartRename`, `TypeInRename`, `ConfirmRename`, `CancelRename`, `IsRenaming`, `GetRenameName`, `GetRenameCursorPos`
 - Control window: `EnsureControlWindow`, `GetControlSelected`, `SetControlSelected`, `WaitForSessionName`
+- Pop-out/callback: `PopOut`, `CallBack`, `HasWindow`, `WaitForWindow`
