@@ -10,6 +10,7 @@ import (
 	"gioui.org/app"
 	"gioui.org/unit"
 
+	"claude-term/src/config"
 	"claude-term/src/emulator"
 	"claude-term/src/pty"
 	"claude-term/src/render"
@@ -32,6 +33,8 @@ type App struct {
 	fontSize   unit.Sp
 	controlWin *ControlWindow
 	discordBot DiscordStatus
+	config     *config.Config
+	configPath string
 }
 
 // SelectionPoint represents a position in the terminal
@@ -232,11 +235,13 @@ func (s *SessionState) GetSelectedText() string {
 }
 
 // NewApp creates a new application
-func NewApp() *App {
+func NewApp(cfg *config.Config, cfgPath string) *App {
 	a := &App{
-		sessions: make(map[string]*SessionState),
-		colors:   render.DefaultColorScheme(),
-		fontSize: 14,
+		sessions:   make(map[string]*SessionState),
+		colors:     render.DefaultColorScheme(),
+		fontSize:   14,
+		config:     cfg,
+		configPath: cfgPath,
 	}
 
 	// Discover and reconnect to existing tmux sessions
@@ -266,13 +271,16 @@ func (a *App) reconnectSession(name string) error {
 	scrollback := emulator.NewScrollback()
 	parser := emulator.NewParser(screen, scrollback)
 
+	// Look up or assign session color
+	sessionColor := a.resolveSessionColor(name)
+
 	state := &SessionState{
 		pty:        ptySess,
 		name:       name,
 		parser:     parser,
 		screen:     screen,
 		scrollback: scrollback,
-		colors:     render.RandomSessionColor(),
+		colors:     sessionColor,
 	}
 
 	// Connect PTY data to parser
@@ -304,18 +312,29 @@ func (a *App) reconnectSession(name string) error {
 	a.sessions[name] = state
 	a.mu.Unlock()
 
-	// Create terminal window
-	go func() {
-		termWin, err := a.CreateTerminalWindow(name)
-		if err != nil {
-			return
-		}
-		termWin.Run()
-		// Window closed = detach only (tmux session survives for reconnection)
-		a.detachSession(name)
-	}()
-
 	return nil
+}
+
+// resolveSessionColor looks up a saved palette index or assigns a new random one
+func (a *App) resolveSessionColor(name string) render.SessionColor {
+	if a.config != nil {
+		if idx, ok := a.config.GetSessionColorIndex(name); ok {
+			return render.GetSessionColor(idx)
+		}
+		// Assign new random index and save
+		idx := render.RandomSessionColorIndex()
+		a.config.SetSessionColorIndex(name, idx)
+		a.saveConfig()
+		return render.GetSessionColor(idx)
+	}
+	return render.RandomSessionColor()
+}
+
+// saveConfig writes config to disk (best-effort, logs no error)
+func (a *App) saveConfig() {
+	if a.config != nil && a.configPath != "" {
+		a.config.Save(a.configPath)
+	}
 }
 
 // Colors returns the current color scheme
@@ -352,6 +371,9 @@ func (a *App) NewSession(name string, sshHost string) (*SessionState, error) {
 	scrollback := emulator.NewScrollback()
 	parser := emulator.NewParser(screen, scrollback)
 
+	// Look up or assign session color
+	sessionColor := a.resolveSessionColor(name)
+
 	state := &SessionState{
 		pty:        ptySess,
 		name:       name,
@@ -359,7 +381,7 @@ func (a *App) NewSession(name string, sshHost string) (*SessionState, error) {
 		parser:     parser,
 		screen:     screen,
 		scrollback: scrollback,
-		colors:     render.RandomSessionColor(),
+		colors:     sessionColor,
 	}
 
 	// Connect PTY data to parser
@@ -436,6 +458,57 @@ func (a *App) detachSession(name string) {
 	}
 }
 
+// PopOutSession creates a standalone terminal window for a session.
+// If the session already has a window, this is a no-op.
+func (a *App) PopOutSession(name string) {
+	state := a.GetSession(name)
+	if state == nil || state.window != nil {
+		return
+	}
+
+	termWin, err := a.CreateTerminalWindow(name)
+	if err != nil {
+		return
+	}
+
+	// Restore saved window size if available
+	if a.config != nil {
+		if size, ok := a.config.GetWindowSize(name); ok && size[0] > 0 && size[1] > 0 {
+			termWin.window.Option(app.Size(unit.Dp(size[0]), unit.Dp(size[1])))
+		}
+	}
+
+	// Run window event loop; on exit save size and detach
+	go func() {
+		termWin.Run()
+
+		// Save window size to config
+		if a.config != nil {
+			lastSize := termWin.LastSize()
+			if lastSize.X > 0 && lastSize.Y > 0 {
+				a.config.SetWindowSize(name, lastSize.X, lastSize.Y)
+				a.saveConfig()
+			}
+		}
+
+		a.detachSession(name)
+		if a.controlWin != nil {
+			a.controlWin.Invalidate()
+		}
+	}()
+}
+
+// CallBackSession closes the standalone window for a session.
+// The session remains alive in the control center.
+func (a *App) CallBackSession(name string) {
+	state := a.GetSession(name)
+	if state == nil || state.window == nil {
+		return
+	}
+	state.window.Close()
+	// The Run() goroutine from PopOutSession handles cleanup (save size, detach, invalidate)
+}
+
 // CloseSession closes a session (case-insensitive)
 func (a *App) CloseSession(name string) error {
 	a.mu.Lock()
@@ -467,6 +540,13 @@ func (a *App) CloseSession(name string) error {
 	}
 
 	tmux.KillSession(actualName)
+
+	// Remove saved color and window size mappings
+	if a.config != nil {
+		a.config.DeleteSessionColor(actualName)
+		a.config.DeleteWindowSize(actualName)
+		a.saveConfig()
+	}
 
 	return nil
 }
@@ -508,6 +588,13 @@ func (a *App) RenameSession(oldName, newName string) error {
 	state.name = newName
 	a.sessions[newName] = state
 
+	// Move saved color and window size mappings
+	if a.config != nil {
+		a.config.RenameSessionColor(actualName, newName)
+		a.config.RenameWindowSize(actualName, newName)
+		a.saveConfig()
+	}
+
 	// Capture window ref before releasing lock
 	win := state.window
 	a.mu.Unlock()
@@ -521,6 +608,33 @@ func (a *App) RenameSession(oldName, newName string) error {
 	}
 
 	return nil
+}
+
+// RecolorSession assigns a new random color to a session and persists it
+func (a *App) RecolorSession(name string) {
+	a.mu.Lock()
+	state := a.sessions[name]
+	if state == nil {
+		a.mu.Unlock()
+		return
+	}
+
+	idx := render.RandomSessionColorIndex()
+	state.colors = render.GetSessionColor(idx)
+
+	if a.config != nil {
+		a.config.SetSessionColorIndex(name, idx)
+		a.saveConfig()
+	}
+
+	// Delete stale termWidget so it recreates with new colors
+	if a.controlWin != nil {
+		delete(a.controlWin.termWidgets, name)
+	}
+	a.mu.Unlock()
+
+	// Invalidate windows to reflect new color
+	a.invalidateSession(name)
 }
 
 // invalidateSession signals windows to redraw for a session
@@ -582,28 +696,14 @@ func (a *App) IsDiscordConnected() bool {
 	return a.discordBot.IsConnected()
 }
 
-// AddSession creates a new session, starts it, and creates a terminal window
-// This is the main entry point for adding sessions (both initial and via IPC)
+// AddSession creates a new session and shows it in the control center.
+// This is the main entry point for adding sessions (both initial and via IPC).
 func (a *App) AddSession(name string, sshHost string) error {
 	// Create and start session (creates tmux session, attaches via PTY)
 	_, err := a.NewSession(name, sshHost)
 	if err != nil {
 		return err
 	}
-
-	// Create terminal window in goroutine (Gio windows run their own event loop)
-	go func() {
-		termWin, err := a.CreateTerminalWindow(name)
-		if err != nil {
-			return
-		}
-
-		// Run terminal window event loop
-		termWin.Run()
-
-		// Window closed = detach only (tmux session survives for reconnection)
-		a.detachSession(name)
-	}()
 
 	// Invalidate control window to show new session
 	if a.controlWin != nil {

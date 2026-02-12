@@ -463,6 +463,39 @@ func (d *TestDriver) WaitForSessionNameGone(name string, timeout time.Duration) 
 	return false
 }
 
+// --- Pop Out / Call Back ---
+
+// PopOut pops out a session into a standalone window
+func (d *TestDriver) PopOut(sessionName string) {
+	d.app.PopOutSession(sessionName)
+}
+
+// CallBack calls back a session from its standalone window
+func (d *TestDriver) CallBack(sessionName string) {
+	d.app.CallBackSession(sessionName)
+}
+
+// HasWindow returns whether the session has a standalone window
+func (d *TestDriver) HasWindow(sessionName string) bool {
+	state := d.app.GetSession(sessionName)
+	if state == nil {
+		return false
+	}
+	return state.window != nil
+}
+
+// WaitForWindow waits for a session to have (or not have) a standalone window
+func (d *TestDriver) WaitForWindow(sessionName string, want bool, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if d.HasWindow(sessionName) == want {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
 // --- Scrollback Content Queries ---
 
 // GetScrollbackLine returns a line from scrollback (0 = oldest)

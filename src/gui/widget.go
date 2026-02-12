@@ -26,14 +26,14 @@ import (
 
 // TerminalWidget is a Gio widget that displays a terminal session
 type TerminalWidget struct {
-	state    *SessionState
-	colors   render.SessionColor
-	fontSize unit.Sp
-	shaper   *text.Shaper
-	theme    *material.Theme // Persistent theme (avoids per-frame allocation)
-	cellW    int
-	cellH    int
-	focused  bool
+	state        *SessionState
+	fontSize     unit.Sp
+	shaper       *text.Shaper
+	theme        *material.Theme // Persistent theme (avoids per-frame allocation)
+	cellW        int
+	cellH        int
+	focused      bool
+	requestFocus bool // Set by parent to request focus each frame
 }
 
 // NewTerminalWidget creates a new terminal widget
@@ -47,7 +47,6 @@ func NewTerminalWidget(state *SessionState, colors render.SessionColor, fontSize
 
 	return &TerminalWidget{
 		state:    state,
-		colors:   colors,
 		fontSize: fontSize,
 		shaper:   shaper,
 		theme:    th,
@@ -75,7 +74,7 @@ func (w *TerminalWidget) Layout(gtx layout.Context) layout.Dimensions {
 	// Draw background for entire area
 	size := image.Point{X: width, Y: height}
 	rect := clip.Rect{Max: size}.Op()
-	paint.FillShape(gtx.Ops, w.colors.Background, rect)
+	paint.FillShape(gtx.Ops, w.state.colors.Background, rect)
 
 	// Offset for padding
 	stack := op.Offset(image.Pt(padding, padding)).Push(gtx.Ops)
@@ -99,6 +98,11 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 
 	// Register this widget for pointer and key events
 	event.Op(gtx.Ops, w)
+
+	// Request keyboard focus within the same scope as event.Op registration
+	if w.requestFocus {
+		gtx.Execute(key.FocusCmd{Tag: w})
+	}
 
 	areaStack.Pop()
 
@@ -196,10 +200,14 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 
 	// Process all key events
 	// Tab must be explicitly named — Gio intercepts unnamed Tab as a focus-navigation SystemEvent
+	// Cmd+C/V/X must be explicitly named — Gio intercepts them as system clipboard shortcuts
 	for {
 		ev, ok := gtx.Event(
 			key.Filter{Optional: key.ModShift | key.ModCtrl | key.ModCommand},
 			key.Filter{Name: key.NameTab},
+			key.Filter{Name: "C", Required: key.ModCommand},
+			key.Filter{Name: "V", Required: key.ModCommand},
+			key.Filter{Name: "X", Required: key.ModCommand},
 		)
 		if !ok {
 			break
@@ -223,6 +231,18 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 								Data: io.NopCloser(strings.NewReader(selectedText)),
 							})
 						}
+					}
+				} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "X" {
+					// Cmd+X for cut (copy selection, then clear it)
+					if w.state.HasSelection() {
+						selectedText := w.state.GetSelectedText()
+						if len(selectedText) > 0 {
+							gtx.Execute(clipboard.WriteCmd{
+								Type: "text/plain",
+								Data: io.NopCloser(strings.NewReader(selectedText)),
+							})
+						}
+						w.state.ClearSelection()
 					}
 				} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "V" {
 					// Cmd+V for paste - request clipboard read
@@ -363,10 +383,10 @@ func (w *TerminalWidget) renderCell(gtx layout.Context, th *material.Theme, x, y
 	isSelected := w.state.IsSelected(x, y)
 
 	// Get colors - adjust indexed (ANSI) colors for contrast against session background
-	fg := cell.FG.ToNRGBA(w.colors.Foreground)
-	bg := cell.BG.ToNRGBA(w.colors.Background)
+	fg := cell.FG.ToNRGBA(w.state.colors.Foreground)
+	bg := cell.BG.ToNRGBA(w.state.colors.Background)
 	if cell.FG.Type == emulator.ColorIndexed {
-		fg = render.AdjustForContrast(fg, w.colors.Background)
+		fg = render.AdjustForContrast(fg, w.state.colors.Background)
 	}
 
 	// Handle reverse video
@@ -469,7 +489,7 @@ func (w *TerminalWidget) renderCursor(gtx layout.Context) {
 		}.Op()
 	}
 
-	paint.FillShape(gtx.Ops, w.colors.Cursor, rect)
+	paint.FillShape(gtx.Ops, w.state.colors.Cursor, rect)
 }
 
 // Focus sets focus on the widget

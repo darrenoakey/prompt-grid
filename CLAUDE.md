@@ -77,7 +77,11 @@ tmux wrapper (`src/tmux/tmux.go`):
 
 ### Session Colors
 - 128 pre-generated colors in HSV space (render/palette.go)
-- Each session gets random color assignment
+- Colors persisted in `~/.config/claude-term/config.json` as `session_colors` map (name → palette index)
+- On session create/reconnect: lookup saved index, or assign random + save
+- On session close: delete color mapping from config
+- On session rename: move mapping old→new name
+- "New Color" context menu: assigns new random palette index, persists, deletes stale termWidget for recreation
 - Light backgrounds get pure black text, dark backgrounds get pure white text
 - ANSI indexed colors adjusted for contrast via `AdjustForContrast()` (luminance threshold 0.5, shift ±77/255)
 - Control center tabs match session colors exactly (bg + fg)
@@ -85,7 +89,7 @@ tmux wrapper (`src/tmux/tmux.go`):
 ### Tab Panel Context Menu
 Right-click anywhere on the left tab panel:
 - **On empty space**: Shows "New Session" only
-- **On a tab**: Shows "New Session", "Rename", "Bring to Front", "Close"
+- **On a tab**: Shows "New Session", "Rename", "New Color", "Bring to Front", "Close"
 
 New session auto-naming:
 - Sessions created via context menu get names "Session 1", "Session 2", etc.
@@ -165,7 +169,7 @@ Rename sessions:
 - **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/claude-term/memdump-{timestamp}.log`.
 
 ## Testing
-126 tests covering emulator, PTY, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast.
+129 tests covering emulator, PTY, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence.
 
 ### Test Isolation with Realms
 - `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories

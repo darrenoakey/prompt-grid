@@ -2,6 +2,7 @@ package gui
 
 import (
 	"fmt"
+	"image"
 	"os"
 	"sync/atomic"
 
@@ -21,12 +22,13 @@ var windowCount int32
 
 // TerminalWindow is a window displaying a single terminal session
 type TerminalWindow struct {
-	app     *App
-	state   *SessionState
-	window  *app.Window
-	widget  *TerminalWidget
-	shaper  *text.Shaper
-	ops     op.Ops
+	app      *App
+	state    *SessionState
+	window   *app.Window
+	widget   *TerminalWidget
+	shaper   *text.Shaper
+	ops      op.Ops
+	lastSize image.Point // Last known window size (pixels) from FrameEvent
 }
 
 // NewTerminalWindow creates a new terminal window
@@ -76,6 +78,7 @@ func (w *TerminalWindow) Run() error {
 			if frameCount%10000 == 0 {
 				fmt.Fprintf(os.Stderr, "DIAG: terminal window %q frame %d\n", w.state.name, frameCount)
 			}
+			w.lastSize = e.Size
 			gtx := app.NewContext(&w.ops, e)
 
 			// Handle resize - calculate new terminal dimensions
@@ -132,4 +135,9 @@ func (w *TerminalWindow) Name() string {
 // SetTitle updates the window title
 func (w *TerminalWindow) SetTitle(title string) {
 	w.window.Option(app.Title(title))
+}
+
+// LastSize returns the last known window size (from the most recent FrameEvent)
+func (w *TerminalWindow) LastSize() image.Point {
+	return w.lastSize
 }

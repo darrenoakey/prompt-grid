@@ -17,27 +17,34 @@ func TestMain(m *testing.M) {
 	testRealm = fmt.Sprintf("test-%d-%d", os.Getpid(), time.Now().UnixNano())
 	os.Setenv(tmux.RealmEnvVar, testRealm)
 
+	// Use a clean shell environment so tests don't wait for user's shell init
+	// files (.zshrc, .bashrc, etc.) which can be slow or block indefinitely.
+	tmpHome, _ := os.MkdirTemp("", "claude-term-test-home-")
+	os.Setenv("HOME", tmpHome)
+	os.Setenv("SHELL", "/bin/bash")
+
 	// Run tests
 	code := m.Run()
 
 	// Cleanup: kill entire tmux server for this realm
 	tmux.KillServer()
 
-	// Remove IPC socket directory
+	// Remove IPC socket directory and temp home
 	os.RemoveAll(tmux.GetSocketDir())
+	os.RemoveAll(tmpHome)
 
 	os.Exit(code)
 }
 
 func TestNewApp(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	if app == nil {
 		t.Fatal("NewApp() returned nil")
 	}
 }
 
 func TestAppNewSession(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 
 	state, err := app.NewSession("test-session", "")
 	if err != nil {
@@ -63,7 +70,7 @@ func TestAppNewSession(t *testing.T) {
 }
 
 func TestAppDuplicateSession(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 
 	_, err := app.NewSession("test-dup", "")
 	if err != nil {
@@ -80,7 +87,7 @@ func TestAppDuplicateSession(t *testing.T) {
 }
 
 func TestAppGetSession(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 
 	_, _ = app.NewSession("test-get", "")
 	defer app.CloseSession("test-get")
@@ -99,7 +106,7 @@ func TestAppGetSession(t *testing.T) {
 }
 
 func TestAppListSessions(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 
 	initial := len(app.ListSessions())
 
@@ -117,7 +124,7 @@ func TestAppListSessions(t *testing.T) {
 }
 
 func TestAppColors(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	colors := app.Colors()
 
 	if colors.Foreground.A != 255 {
@@ -129,7 +136,7 @@ func TestAppColors(t *testing.T) {
 }
 
 func TestAppFontSize(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	fontSize := app.FontSize()
 
 	if fontSize <= 0 {

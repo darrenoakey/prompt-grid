@@ -1,15 +1,18 @@
 package gui
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 	"time"
+
+	"claude-term/src/config"
 )
 
 // --- Session State Tests ---
 
 func TestSessionStateScrollOffset(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-scroll-state")
@@ -52,7 +55,7 @@ func TestSessionStateScrollOffset(t *testing.T) {
 }
 
 func TestSessionStateSelection(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-selection")
@@ -98,7 +101,7 @@ func TestSessionStateSelection(t *testing.T) {
 // --- Screen Content Tests ---
 
 func TestScreenContent(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-content")
@@ -122,7 +125,7 @@ func TestScreenContent(t *testing.T) {
 }
 
 func TestCursorPosition(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-cursor")
@@ -148,7 +151,7 @@ func TestCursorPosition(t *testing.T) {
 // --- Scrollback Tests ---
 
 func TestScrollback(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-scrollback")
@@ -181,7 +184,7 @@ func TestScrollback(t *testing.T) {
 }
 
 func TestScrollbackViewing(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-scroll-view")
@@ -214,7 +217,7 @@ func TestScrollbackViewing(t *testing.T) {
 // --- Multi-Session Tests ---
 
 func TestMultipleSessions(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	// Create multiple sessions
@@ -275,7 +278,7 @@ func TestMultipleSessions(t *testing.T) {
 }
 
 func TestSessionColors(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-color-a")
@@ -310,7 +313,7 @@ func TestSessionColors(t *testing.T) {
 // --- Input Handling Tests ---
 
 func TestKeyboardInput(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-input")
@@ -327,7 +330,7 @@ func TestKeyboardInput(t *testing.T) {
 }
 
 func TestCtrlC(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-ctrl-c")
@@ -352,7 +355,7 @@ func TestCtrlC(t *testing.T) {
 // --- Wait Helpers Tests ---
 
 func TestWaitForContent(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-wait")
@@ -374,7 +377,7 @@ func TestWaitForContent(t *testing.T) {
 }
 
 func TestWaitForPattern(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-pattern")
@@ -396,7 +399,7 @@ func TestWaitForPattern(t *testing.T) {
 // --- Rename Tests (BDD-style using TestDriver) ---
 
 func TestRenameCancelPreservesOriginalName(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	// Given: I have an open control center with two sessions
@@ -463,7 +466,7 @@ func TestRenameCancelPreservesOriginalName(t *testing.T) {
 }
 
 func TestRenameConfirmChangesName(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	// Given: I have an open control center with two sessions
@@ -532,7 +535,7 @@ func TestRenameConfirmChangesName(t *testing.T) {
 }
 
 func TestRenameNoChangeIsNoop(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	// Given: a session
@@ -562,7 +565,7 @@ func TestRenameNoChangeIsNoop(t *testing.T) {
 }
 
 func TestRenameEmptyNameIsNoop(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	// Given: a session
@@ -595,7 +598,7 @@ func TestRenameEmptyNameIsNoop(t *testing.T) {
 // --- Cell Attribute Tests ---
 
 func TestCellAttributes(t *testing.T) {
-	app := NewApp()
+	app := NewApp(nil, "")
 	driver := NewTestDriver(app)
 
 	err := driver.CreateSession("test-attrs")
@@ -616,5 +619,277 @@ func TestCellAttributes(t *testing.T) {
 	}
 	if !strings.Contains(content, "normal") {
 		t.Error("Screen should contain 'normal' text")
+	}
+}
+
+// --- Color Persistence Tests ---
+
+func TestColorPersistence(t *testing.T) {
+	cfg := &config.Config{}
+	app := NewApp(cfg, "")
+	driver := NewTestDriver(app)
+
+	// Create session — should assign a color and save to config
+	err := driver.CreateSession("test-persist-color")
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	// Get assigned color
+	originalColor := driver.GetSessionColor("test-persist-color")
+	if originalColor.A == 0 {
+		t.Fatal("Session should have a color assigned")
+	}
+
+	// Verify color index was saved in config
+	idx, ok := cfg.GetSessionColorIndex("test-persist-color")
+	if !ok {
+		t.Fatal("Color index should be saved in config")
+	}
+
+	// Close and recreate session
+	driver.CloseSession("test-persist-color")
+	time.Sleep(100 * time.Millisecond)
+
+	// Color mapping should have been deleted on close
+	_, ok = cfg.GetSessionColorIndex("test-persist-color")
+	if ok {
+		t.Fatal("Color index should be deleted after close")
+	}
+
+	// Manually set the color index back (simulating config loaded from disk)
+	cfg.SetSessionColorIndex("test-persist-color2", idx)
+
+	// Create session with same saved index
+	err = driver.CreateSession("test-persist-color2")
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	defer driver.CloseSession("test-persist-color2")
+
+	// Should get the same color as before
+	restoredColor := driver.GetSessionColor("test-persist-color2")
+	if restoredColor != originalColor {
+		t.Errorf("Restored color %v != original %v", restoredColor, originalColor)
+	}
+}
+
+func TestRecolorSession(t *testing.T) {
+	cfg := &config.Config{}
+	app := NewApp(cfg, "")
+	driver := NewTestDriver(app)
+
+	err := driver.CreateSession("test-recolor")
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	defer driver.CloseSession("test-recolor")
+
+	originalColor := driver.GetSessionColor("test-recolor")
+	originalIdx, _ := cfg.GetSessionColorIndex("test-recolor")
+
+	// Recolor until we get a different color (random, so loop)
+	var newColor color.NRGBA
+	for i := 0; i < 100; i++ {
+		app.RecolorSession("test-recolor")
+		newColor = driver.GetSessionColor("test-recolor")
+		if newColor != originalColor {
+			break
+		}
+	}
+
+	if newColor == originalColor {
+		t.Error("After recoloring, color should change (tried 100 times)")
+	}
+
+	// Verify config was updated
+	newIdx, ok := cfg.GetSessionColorIndex("test-recolor")
+	if !ok {
+		t.Fatal("Config should have new color index")
+	}
+	if newIdx == originalIdx && newColor != originalColor {
+		t.Error("Config index should have changed")
+	}
+}
+
+func TestRenamePreservesColor(t *testing.T) {
+	cfg := &config.Config{}
+	app := NewApp(cfg, "")
+	driver := NewTestDriver(app)
+
+	err := driver.CreateSession("test-rename-color")
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	originalColor := driver.GetSessionColor("test-rename-color")
+	originalIdx, _ := cfg.GetSessionColorIndex("test-rename-color")
+
+	// Rename the session
+	err = app.RenameSession("test-rename-color", "test-renamed-color")
+	if err != nil {
+		t.Fatalf("RenameSession() error = %v", err)
+	}
+	defer driver.CloseSession("test-renamed-color")
+
+	// Color should be preserved under new name
+	renamedColor := driver.GetSessionColor("test-renamed-color")
+	if renamedColor != originalColor {
+		t.Errorf("Color after rename %v != original %v", renamedColor, originalColor)
+	}
+
+	// Config should have new name, not old
+	newIdx, ok := cfg.GetSessionColorIndex("test-renamed-color")
+	if !ok {
+		t.Fatal("Config should have color index under new name")
+	}
+	if newIdx != originalIdx {
+		t.Errorf("Color index changed after rename: %d != %d", newIdx, originalIdx)
+	}
+
+	_, ok = cfg.GetSessionColorIndex("test-rename-color")
+	if ok {
+		t.Error("Config should not have color index under old name")
+	}
+}
+
+// --- Pop Out / Call Back Tests ---
+
+func TestSessionCreatedWithoutWindow(t *testing.T) {
+	app := NewApp(nil, "")
+	driver := NewTestDriver(app)
+
+	err := driver.CreateSession("test-no-window")
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	defer driver.CloseSession("test-no-window")
+
+	// Session should exist but have no standalone window
+	if driver.HasWindow("test-no-window") {
+		t.Error("New session should not have a standalone window")
+	}
+
+	// Session should be functional (can receive input)
+	driver.TypeText("test-no-window", "echo 'HEADLESS_TEST'\r")
+	if !driver.WaitForContent("test-no-window", "HEADLESS_TEST", 3*time.Second) {
+		t.Error("Session should be functional without a window")
+	}
+}
+
+func TestCallBackSessionStillExists(t *testing.T) {
+	app := NewApp(nil, "")
+	driver := NewTestDriver(app)
+
+	err := driver.CreateSession("test-callback")
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	defer driver.CloseSession("test-callback")
+
+	// Session starts without a window
+	if driver.HasWindow("test-callback") {
+		t.Error("Session should start without window")
+	}
+
+	// After call back on a session with no window, session should still exist
+	driver.CallBack("test-callback")
+	state := app.GetSession("test-callback")
+	if state == nil {
+		t.Error("Session should still exist after call back")
+	}
+}
+
+func TestCloseDeletesWindowSize(t *testing.T) {
+	cfg := &config.Config{}
+	app := NewApp(cfg, "")
+	driver := NewTestDriver(app)
+
+	err := driver.CreateSession("test-close-size")
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	// Manually set a window size in config
+	cfg.SetWindowSize("test-close-size", 800, 600)
+
+	// Close should delete the window size
+	driver.CloseSession("test-close-size")
+	time.Sleep(100 * time.Millisecond)
+
+	_, ok := cfg.GetWindowSize("test-close-size")
+	if ok {
+		t.Error("Window size should be deleted after close")
+	}
+}
+
+func TestRenamePreservesWindowSize(t *testing.T) {
+	cfg := &config.Config{}
+	app := NewApp(cfg, "")
+	driver := NewTestDriver(app)
+
+	err := driver.CreateSession("test-rename-size")
+	if err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	// Set a window size
+	cfg.SetWindowSize("test-rename-size", 1024, 768)
+
+	// Rename the session
+	err = app.RenameSession("test-rename-size", "test-renamed-size")
+	if err != nil {
+		t.Fatalf("RenameSession() error = %v", err)
+	}
+	defer driver.CloseSession("test-renamed-size")
+
+	// Window size should be under new name
+	size, ok := cfg.GetWindowSize("test-renamed-size")
+	if !ok {
+		t.Fatal("Window size should exist under new name")
+	}
+	if size[0] != 1024 || size[1] != 768 {
+		t.Errorf("Window size = %v, want [1024, 768]", size)
+	}
+
+	// Old name should be gone
+	_, ok = cfg.GetWindowSize("test-rename-size")
+	if ok {
+		t.Error("Window size should not exist under old name")
+	}
+}
+
+func TestWindowSizeConfig(t *testing.T) {
+	cfg := &config.Config{}
+
+	// Initially no sizes
+	_, ok := cfg.GetWindowSize("test")
+	if ok {
+		t.Error("Should not have window size initially")
+	}
+
+	// Set and get
+	cfg.SetWindowSize("test", 800, 600)
+	size, ok := cfg.GetWindowSize("test")
+	if !ok || size[0] != 800 || size[1] != 600 {
+		t.Errorf("GetWindowSize = %v, %v; want [800,600], true", size, ok)
+	}
+
+	// Rename
+	cfg.RenameWindowSize("test", "test2")
+	_, ok = cfg.GetWindowSize("test")
+	if ok {
+		t.Error("Old name should be gone after rename")
+	}
+	size, ok = cfg.GetWindowSize("test2")
+	if !ok || size[0] != 800 || size[1] != 600 {
+		t.Errorf("After rename, GetWindowSize = %v, %v; want [800,600], true", size, ok)
+	}
+
+	// Delete
+	cfg.DeleteWindowSize("test2")
+	_, ok = cfg.GetWindowSize("test2")
+	if ok {
+		t.Error("Should be gone after delete")
 	}
 }

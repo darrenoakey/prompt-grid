@@ -8,7 +8,9 @@ import (
 
 // Config holds application configuration
 type Config struct {
-	Discord DiscordConfig `json:"discord"`
+	Discord       DiscordConfig  `json:"discord"`
+	SessionColors map[string]int `json:"session_colors,omitempty"`
+	WindowSizes   map[string][2]int `json:"window_sizes,omitempty"`
 }
 
 // DiscordConfig holds Discord-specific configuration
@@ -68,7 +70,78 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	cfg.ensureSessionColors()
 	return &cfg, nil
+}
+
+// ensureSessionColors initializes the SessionColors map if nil
+func (c *Config) ensureSessionColors() {
+	if c.SessionColors == nil {
+		c.SessionColors = make(map[string]int)
+	}
+}
+
+// GetSessionColorIndex returns the saved palette index for a session name
+func (c *Config) GetSessionColorIndex(name string) (int, bool) {
+	c.ensureSessionColors()
+	idx, ok := c.SessionColors[name]
+	return idx, ok
+}
+
+// SetSessionColorIndex sets the palette index for a session name
+func (c *Config) SetSessionColorIndex(name string, index int) {
+	c.ensureSessionColors()
+	c.SessionColors[name] = index
+}
+
+// DeleteSessionColor removes the color mapping for a session
+func (c *Config) DeleteSessionColor(name string) {
+	c.ensureSessionColors()
+	delete(c.SessionColors, name)
+}
+
+// RenameSessionColor moves a color mapping from oldName to newName
+func (c *Config) RenameSessionColor(oldName, newName string) {
+	c.ensureSessionColors()
+	if idx, ok := c.SessionColors[oldName]; ok {
+		c.SessionColors[newName] = idx
+		delete(c.SessionColors, oldName)
+	}
+}
+
+// ensureWindowSizes initializes the WindowSizes map if nil
+func (c *Config) ensureWindowSizes() {
+	if c.WindowSizes == nil {
+		c.WindowSizes = make(map[string][2]int)
+	}
+}
+
+// GetWindowSize returns the saved window size [width, height] in Dp for a session name
+func (c *Config) GetWindowSize(name string) ([2]int, bool) {
+	c.ensureWindowSizes()
+	size, ok := c.WindowSizes[name]
+	return size, ok
+}
+
+// SetWindowSize saves the window size [width, height] in Dp for a session name
+func (c *Config) SetWindowSize(name string, w, h int) {
+	c.ensureWindowSizes()
+	c.WindowSizes[name] = [2]int{w, h}
+}
+
+// DeleteWindowSize removes the saved window size for a session
+func (c *Config) DeleteWindowSize(name string) {
+	c.ensureWindowSizes()
+	delete(c.WindowSizes, name)
+}
+
+// RenameWindowSize moves a window size mapping from oldName to newName
+func (c *Config) RenameWindowSize(oldName, newName string) {
+	c.ensureWindowSizes()
+	if size, ok := c.WindowSizes[oldName]; ok {
+		c.WindowSizes[newName] = size
+		delete(c.WindowSizes, oldName)
+	}
 }
 
 // LoadDefault loads configuration from the default path

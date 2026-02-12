@@ -158,6 +158,11 @@ func RandomSessionColor() SessionColor {
 	return sessionPalette[rand.Intn(len(sessionPalette))]
 }
 
+// RandomSessionColorIndex returns a random palette index
+func RandomSessionColorIndex() int {
+	return rand.Intn(len(sessionPalette))
+}
+
 // GetSessionColor returns a specific session color by index
 func GetSessionColor(index int) SessionColor {
 	return sessionPalette[index%len(sessionPalette)]

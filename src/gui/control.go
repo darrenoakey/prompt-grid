@@ -21,6 +21,7 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget/material"
 
+	"claude-term/src/pty"
 	"claude-term/src/render"
 )
 
@@ -40,6 +41,7 @@ type ControlWindow struct {
 	tabPanelBg     *tabPanelBackground        // For right-click on empty tab area
 	renameState    *renameState               // For renaming sessions
 	focusTerminal  bool                       // One-shot: request focus for terminal widget next frame
+	lastTermSize   image.Point               // Last terminal area size (pixels) for resize detection
 }
 
 // tabPanelBackground is a persistent target for right-click on empty tab area
@@ -367,7 +369,8 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int
 						// Left-click - select tab and focus terminal
 						w.selected = tab.name
 						w.focusTerminal = true
-						w.contextMenu.visible = false // Close context menu on left click
+						w.lastTermSize = image.Point{} // Force resize for new session
+						w.contextMenu.visible = false  // Close context menu on left click
 					}
 				}
 			}
@@ -379,15 +382,27 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int
 	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
 	paint.FillShape(gtx.Ops, sessionBg, rect)
 
-	// Add visual feedback for selected/hovered with semi-transparent overlay
-	if tab.name == w.selected {
-		// White highlight for selected
-		highlightRect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
-		paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 40}, highlightRect)
-	} else if tab.hovered && !isRenaming {
-		// Subtle white highlight for hovered
+	// Hover feedback only (no color-altering overlay for selection)
+	if tab.hovered && tab.name != w.selected && !isRenaming {
 		highlightRect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
 		paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 20}, highlightRect)
+	}
+
+	// Selection indicator: arrow on the left
+	isSelected := tab.name == w.selected
+	textLeftPad := 12
+	if isSelected {
+		textLeftPad = 24 // Make room for arrow
+		arrow := material.Label(w.theme, unit.Sp(12), "\u25B6") // ▶
+		arrow.Color = sessionFg
+		arrowStack := op.Offset(image.Pt(8, 12)).Push(gtx.Ops)
+		arrowGtx := gtx
+		arrowGtx.Constraints = layout.Constraints{
+			Min: image.Point{},
+			Max: image.Point{X: 16, Y: height},
+		}
+		arrow.Layout(arrowGtx)
+		arrowStack.Pop()
 	}
 
 	// Draw tab name or rename input
@@ -400,11 +415,11 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int
 		label.Color = sessionFg
 
 		// Position label with padding
-		stack := op.Offset(image.Pt(12, 10)).Push(gtx.Ops)
+		stack := op.Offset(image.Pt(textLeftPad, 10)).Push(gtx.Ops)
 		labelGtx := gtx
 		labelGtx.Constraints = layout.Constraints{
 			Min: image.Point{X: 0, Y: 0},
-			Max: image.Point{X: tabWidth - 24, Y: height - 10},
+			Max: image.Point{X: tabWidth - textLeftPad - 12, Y: height - 10},
 		}
 		label.Layout(labelGtx)
 		stack.Pop()
@@ -482,6 +497,25 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 		return layout.Dimensions{Size: gtx.Constraints.Max}
 	}
 
+	// Resize emulator/PTY to fit available space (like TerminalWindow does)
+	padding := 8
+	availW := gtx.Constraints.Max.X - padding*2
+	availH := gtx.Constraints.Max.Y - padding*2
+	termSize := image.Point{X: availW, Y: availH}
+	if termSize != w.lastTermSize {
+		w.lastTermSize = termSize
+		cellW := int(float32(w.app.FontSize()) * 0.6)
+		cellH := int(float32(w.app.FontSize()) * 1.5)
+		if cellW > 0 && cellH > 0 {
+			newCols := availW / cellW
+			newRows := availH / cellH
+			if newCols > 0 && newRows > 0 {
+				state.screen.Resize(newCols, newRows)
+				state.pty.Resize(pty.Size{Cols: uint16(newCols), Rows: uint16(newRows)})
+			}
+		}
+	}
+
 	// Get or create persistent widget for this session
 	// Must persist across frames for event routing to work
 	widget, ok := w.termWidgets[w.selected]
@@ -490,24 +524,21 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 		w.termWidgets[w.selected] = widget
 	}
 
-	// Give keyboard focus to the terminal widget (one-shot, not every frame)
-	if w.focusTerminal && !w.renameState.active {
-		gtx.Execute(key.FocusCmd{Tag: widget})
-		w.focusTerminal = false
-	}
+	// Tell the widget to maintain its own focus each frame
+	widget.requestFocus = !w.renameState.active
 
-	// Add padding around terminal
-	padding := 8
+	// Layout terminal in the available space
 	stack := op.Offset(image.Pt(padding, padding)).Push(gtx.Ops)
 	paddedGtx := gtx
-	paddedGtx.Constraints.Max.X -= padding * 2
-	paddedGtx.Constraints.Max.Y -= padding * 2
+	paddedGtx.Constraints.Max.X = availW
+	paddedGtx.Constraints.Max.Y = availH
 	paddedGtx.Constraints.Min = image.Point{}
 	widget.Layout(paddedGtx)
 	stack.Pop()
 
 	return layout.Dimensions{Size: gtx.Constraints.Max}
 }
+
 
 
 func shiftChar(ch byte) byte {
@@ -569,17 +600,50 @@ func (w *ControlWindow) showContextMenu(sessionName string, pos image.Point) {
 		})
 
 		items = append(items, &menuItem{
-			label: "Bring to Front",
+			label: "New Color",
 			action: func() {
 				w.contextMenu.visible = false
 				w.window.Invalidate()
 				go func() {
-					if state := w.app.GetSession(sessionName); state != nil && state.window != nil {
-						state.window.BringToFront()
-					}
+					w.app.RecolorSession(sessionName)
 				}()
 			},
 		})
+
+		// Dynamic window items based on whether session has a standalone window
+		state := w.app.GetSession(sessionName)
+		if state != nil && state.window == nil {
+			items = append(items, &menuItem{
+				label: "Pop Out",
+				action: func() {
+					w.contextMenu.visible = false
+					w.window.Invalidate()
+					go w.app.PopOutSession(sessionName)
+				},
+			})
+		}
+		if state != nil && state.window != nil {
+			items = append(items, &menuItem{
+				label: "Bring to Front",
+				action: func() {
+					w.contextMenu.visible = false
+					w.window.Invalidate()
+					go func() {
+						if s := w.app.GetSession(sessionName); s != nil && s.window != nil {
+							s.window.BringToFront()
+						}
+					}()
+				},
+			})
+			items = append(items, &menuItem{
+				label: "Call Back",
+				action: func() {
+					w.contextMenu.visible = false
+					w.window.Invalidate()
+					go w.app.CallBackSession(sessionName)
+				},
+			})
+		}
 
 		items = append(items, &menuItem{
 			label: "Close",

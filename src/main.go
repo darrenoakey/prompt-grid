@@ -151,8 +151,16 @@ func runDaemon() {
 		os.Exit(1)
 	}
 
-	// Create application
-	application := gui.NewApp()
+	// Load config (before creating App so colors can be restored)
+	cfgPath := config.DefaultConfigPath()
+	cfg, cfgErr := config.LoadDefault()
+	if cfgErr != nil {
+		fmt.Fprintf(os.Stderr, "Config not loaded: %v (using defaults)\n", cfgErr)
+		cfg = &config.Config{}
+	}
+
+	// Create application with config
+	application := gui.NewApp(cfg, cfgPath)
 
 	// Create IPC server
 	server, err := ipc.NewServer(func(req ipc.Request) error {
@@ -168,7 +176,6 @@ func runDaemon() {
 
 	// Initialize Discord bot
 	var bot *discord.Bot
-	cfg, cfgErr := config.LoadDefault()
 	if cfgErr == nil {
 		bot, err = discord.NewBot(&cfg.Discord, application)
 		if err != nil {
@@ -179,8 +186,6 @@ func runDaemon() {
 				bot = nil
 			}
 		}
-	} else {
-		fmt.Fprintf(os.Stderr, "Config not loaded: %v\n", cfgErr)
 	}
 
 	// Ensure bot cleanup on exit
