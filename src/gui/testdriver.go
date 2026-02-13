@@ -24,7 +24,7 @@ func NewTestDriver(app *App) *TestDriver {
 
 // CreateSession creates a new session and waits for it to be ready
 func (d *TestDriver) CreateSession(name string) error {
-	_, err := d.app.NewSession(name, "")
+	_, err := d.app.NewSession(name, "", "")
 	if err != nil {
 		return err
 	}

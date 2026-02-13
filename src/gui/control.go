@@ -4,15 +4,20 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
 	"gioui.org/app"
+	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 	"gioui.org/io/system"
+	"gioui.org/io/transfer"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -72,6 +77,7 @@ type menuItem struct {
 	label   string
 	action  func()
 	hovered bool
+	submenu []*menuItem // If non-nil, hovering shows a submenu
 }
 
 // NewControlWindow creates the control center window
@@ -174,9 +180,11 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		}
 	}
 
-	// Handle rename keyboard input
+	// Handle keyboard input: rename handler OR terminal forwarding
 	if w.renameState.active {
 		w.handleRenameInput(gtx)
+	} else {
+		w.handleTerminalKeyboard(gtx)
 	}
 
 	// Handle clicks outside context menu to dismiss it
@@ -191,12 +199,33 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 				break
 			}
 			if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
-				// Check if click is outside the menu
-				menuWidth := 140
-				menuHeight := len(w.contextMenu.items) * 28
+				// Check if click is outside the menu (and submenu if visible)
+				menuWidth := 180
+				itemHeight := 28
+				menuHeight := len(w.contextMenu.items) * itemHeight
 				pos := w.contextMenu.position
 				clickX, clickY := int(e.Position.X), int(e.Position.Y)
-				if clickX < pos.X || clickX > pos.X+menuWidth || clickY < pos.Y || clickY > pos.Y+menuHeight {
+
+				inMain := clickX >= pos.X && clickX <= pos.X+menuWidth &&
+					clickY >= pos.Y && clickY <= pos.Y+menuHeight
+
+				// Check if click is in submenu area
+				inSub := false
+				for i, item := range w.contextMenu.items {
+					if item.hovered && item.submenu != nil {
+						subX := pos.X + menuWidth + 2
+						subY := pos.Y + i*itemHeight
+						subW := 200
+						subH := len(item.submenu) * itemHeight
+						if clickX >= subX && clickX <= subX+subW &&
+							clickY >= subY && clickY <= subY+subH {
+							inSub = true
+						}
+						break
+					}
+				}
+
+				if !inMain && !inSub {
 					w.contextMenu.visible = false
 				}
 			}
@@ -524,8 +553,9 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 		w.termWidgets[w.selected] = widget
 	}
 
-	// Tell the widget to maintain its own focus each frame
-	widget.requestFocus = !w.renameState.active
+	// Control center handles keyboard at window level; widget handles only mouse events
+	widget.skipKeyboard = true
+	widget.requestFocus = false
 
 	// Layout terminal in the available space
 	stack := op.Offset(image.Pt(padding, padding)).Push(gtx.Ops)
@@ -587,6 +617,43 @@ func (w *ControlWindow) showContextMenu(sessionName string, pos image.Point) {
 			}()
 		},
 	})
+
+	// "New Claude Session" with submenu of ~/src directories
+	if dirs := listSrcDirs(); len(dirs) > 0 {
+		claudeItem := &menuItem{label: "New Claude \u25b8"}
+		for _, dirName := range dirs {
+			dn := dirName // capture for closure
+			home, _ := os.UserHomeDir()
+			fullPath := filepath.Join(home, "src", dn)
+			claudeItem.submenu = append(claudeItem.submenu, &menuItem{
+				label: dn,
+				action: func() {
+					w.contextMenu.visible = false
+					w.window.Invalidate()
+					// Pick a unique session name
+					name := dn
+					if w.app.GetSession(name) != nil {
+						for i := 2; ; i++ {
+							candidate := fmt.Sprintf("%s-%d", dn, i)
+							if w.app.GetSession(candidate) == nil {
+								name = candidate
+								break
+							}
+						}
+					}
+					go func() {
+						err := w.app.AddClaudeSession(name, fullPath)
+						if err == nil {
+							w.selected = name
+							w.focusTerminal = true
+							w.window.Invalidate()
+						}
+					}()
+				},
+			})
+		}
+		items = append(items, claudeItem)
+	}
 
 	// Session-specific menu items only when clicking on a tab
 	if sessionName != "" {
@@ -679,6 +746,26 @@ func (w *ControlWindow) nextSessionName() string {
 			return fmt.Sprintf("Session %d", i)
 		}
 	}
+}
+
+// listSrcDirs returns directory names under ~/src (non-hidden, sorted)
+func listSrcDirs() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	entries, err := os.ReadDir(filepath.Join(home, "src"))
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	sort.Strings(dirs)
+	return dirs
 }
 
 // startRename begins the rename operation for a session
@@ -802,103 +889,284 @@ func (w *ControlWindow) handleRenameInput(gtx layout.Context) {
 	areaStack.Pop()
 }
 
+// handleTerminalKeyboard handles keyboard input at the window level and forwards to the PTY.
+// This is used instead of widget-level keyboard handling because Gio's focus model
+// in the control center steals focus from the embedded terminal widget.
+func (w *ControlWindow) handleTerminalKeyboard(gtx layout.Context) {
+	state := w.app.GetSession(w.selected)
+	if state == nil {
+		return
+	}
+
+	// Register the control window as the keyboard event target
+	areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
+	event.Op(gtx.Ops, w)
+	gtx.Execute(key.FocusCmd{Tag: w})
+	areaStack.Pop()
+
+	// Process key events — same filters as standalone TerminalWidget
+	for {
+		ev, ok := gtx.Event(
+			key.Filter{Optional: key.ModShift | key.ModCtrl | key.ModCommand},
+			key.Filter{Name: key.NameTab},
+			key.Filter{Name: "C", Required: key.ModCommand},
+			key.Filter{Name: "V", Required: key.ModCommand},
+			key.Filter{Name: "X", Required: key.ModCommand},
+		)
+		if !ok {
+			break
+		}
+		switch e := ev.(type) {
+		case key.EditEvent:
+			state.ClearSelection()
+			if len(e.Text) > 0 {
+				state.pty.Write([]byte(e.Text))
+			}
+		case key.Event:
+			if e.State == key.Press {
+				if e.Modifiers.Contain(key.ModCommand) && e.Name == "C" {
+					// Cmd+C: copy selection
+					if state.HasSelection() {
+						selectedText := state.GetSelectedText()
+						if len(selectedText) > 0 {
+							gtx.Execute(clipboard.WriteCmd{
+								Type: "text/plain",
+								Data: io.NopCloser(strings.NewReader(selectedText)),
+							})
+						}
+					}
+				} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "X" {
+					// Cmd+X: cut (copy + clear selection)
+					if state.HasSelection() {
+						selectedText := state.GetSelectedText()
+						if len(selectedText) > 0 {
+							gtx.Execute(clipboard.WriteCmd{
+								Type: "text/plain",
+								Data: io.NopCloser(strings.NewReader(selectedText)),
+							})
+						}
+						state.ClearSelection()
+					}
+				} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "V" {
+					// Cmd+V: paste — request clipboard read
+					gtx.Execute(clipboard.ReadCmd{Tag: w})
+				} else {
+					state.ClearSelection()
+					w.forwardKeyToSession(state, e)
+				}
+			}
+		}
+	}
+
+	// Process clipboard paste data
+	for {
+		ev, ok := gtx.Event(
+			transfer.TargetFilter{Target: w, Type: "text/plain"},
+		)
+		if !ok {
+			break
+		}
+		if e, ok := ev.(transfer.DataEvent); ok {
+			data := e.Open()
+			if data != nil {
+				content, _ := io.ReadAll(data)
+				data.Close()
+				if len(content) > 0 {
+					state.pty.Write(content)
+				}
+			}
+		}
+	}
+}
+
+// forwardKeyToSession converts a Gio key event to bytes and writes to the session PTY
+func (w *ControlWindow) forwardKeyToSession(state *SessionState, e key.Event) {
+	var data []byte
+
+	switch e.Name {
+	case key.NameReturn, key.NameEnter:
+		data = []byte{'\r'}
+	case key.NameDeleteBackward:
+		data = []byte{0x7f}
+	case key.NameTab:
+		data = []byte{'\t'}
+	case key.NameEscape:
+		data = []byte{0x1b}
+	case key.NameUpArrow:
+		data = []byte{0x1b, '[', 'A'}
+	case key.NameDownArrow:
+		data = []byte{0x1b, '[', 'B'}
+	case key.NameRightArrow:
+		data = []byte{0x1b, '[', 'C'}
+	case key.NameLeftArrow:
+		data = []byte{0x1b, '[', 'D'}
+	case key.NameHome:
+		data = []byte{0x1b, '[', 'H'}
+	case key.NameEnd:
+		data = []byte{0x1b, '[', 'F'}
+	case key.NamePageUp:
+		data = []byte{0x1b, '[', '5', '~'}
+	case key.NamePageDown:
+		data = []byte{0x1b, '[', '6', '~'}
+	case key.NameDeleteForward:
+		data = []byte{0x1b, '[', '3', '~'}
+	case key.NameSpace:
+		data = []byte{' '}
+	default:
+		if len(e.Name) == 1 {
+			ch := e.Name[0]
+			if e.Modifiers.Contain(key.ModCtrl) {
+				if ch >= 'A' && ch <= 'Z' {
+					data = []byte{ch - 'A' + 1}
+				} else if ch >= 'a' && ch <= 'z' {
+					data = []byte{ch - 'a' + 1}
+				}
+			} else if e.Modifiers.Contain(key.ModShift) {
+				data = []byte{shiftChar(ch)}
+			} else {
+				if ch >= 'A' && ch <= 'Z' {
+					data = []byte{ch + 32}
+				} else {
+					data = []byte{ch}
+				}
+			}
+		}
+	}
+
+	if len(data) > 0 {
+		state.pty.Write(data)
+	}
+}
+
 func (w *ControlWindow) layoutContextMenu(gtx layout.Context) {
 	if !w.contextMenu.visible {
 		return
 	}
 
 	itemHeight := 28
-	menuWidth := 140
+	menuWidth := 180
 	menuHeight := len(w.contextMenu.items) * itemHeight
 
 	// Menu position
 	pos := w.contextMenu.position
 
-	// Draw menu background with shadow
+	// Draw menu panel
+	w.drawMenuPanel(gtx, pos, menuWidth, menuHeight)
+
+	// Draw menu items and find active submenu
+	var activeSubmenu []*menuItem
+	var submenuY int
+	for i, item := range w.contextMenu.items {
+		itemY := pos.Y + i*itemHeight
+		w.drawMenuItem(gtx, item, pos.X, itemY, menuWidth, itemHeight)
+		if item.hovered && item.submenu != nil {
+			activeSubmenu = item.submenu
+			submenuY = itemY
+		}
+	}
+
+	// Render submenu if active
+	if activeSubmenu != nil {
+		subX := pos.X + menuWidth + 2
+		subWidth := 200
+		subHeight := len(activeSubmenu) * itemHeight
+
+		// Clamp submenu Y so it doesn't go off screen
+		maxY := gtx.Constraints.Max.Y
+		if submenuY+subHeight > maxY {
+			submenuY = maxY - subHeight
+		}
+
+		w.drawMenuPanel(gtx, image.Point{X: subX, Y: submenuY}, subWidth, subHeight)
+		for i, subItem := range activeSubmenu {
+			subItemY := submenuY + i*itemHeight
+			w.drawMenuItem(gtx, subItem, subX, subItemY, subWidth, itemHeight)
+		}
+	}
+}
+
+// drawMenuPanel draws the background, shadow, and border for a menu panel
+func (w *ControlWindow) drawMenuPanel(gtx layout.Context, pos image.Point, width, height int) {
+	// Shadow
 	shadowRect := clip.Rect{
 		Min: image.Point{X: pos.X + 2, Y: pos.Y + 2},
-		Max: image.Point{X: pos.X + menuWidth + 2, Y: pos.Y + menuHeight + 2},
+		Max: image.Point{X: pos.X + width + 2, Y: pos.Y + height + 2},
 	}.Op()
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 0, G: 0, B: 0, A: 80}, shadowRect)
 
-	// Menu background
+	// Background
 	menuRect := clip.Rect{
 		Min: pos,
-		Max: image.Point{X: pos.X + menuWidth, Y: pos.Y + menuHeight},
+		Max: image.Point{X: pos.X + width, Y: pos.Y + height},
 	}.Op()
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 45, G: 45, B: 50, A: 255}, menuRect)
 
 	// Border
 	for _, edge := range []clip.Rect{
-		{Min: pos, Max: image.Point{X: pos.X + menuWidth, Y: pos.Y + 1}},                                   // top
-		{Min: image.Point{X: pos.X, Y: pos.Y + menuHeight - 1}, Max: image.Point{X: pos.X + menuWidth, Y: pos.Y + menuHeight}}, // bottom
-		{Min: pos, Max: image.Point{X: pos.X + 1, Y: pos.Y + menuHeight}},                                   // left
-		{Min: image.Point{X: pos.X + menuWidth - 1, Y: pos.Y}, Max: image.Point{X: pos.X + menuWidth, Y: pos.Y + menuHeight}}, // right
+		{Min: pos, Max: image.Point{X: pos.X + width, Y: pos.Y + 1}},
+		{Min: image.Point{X: pos.X, Y: pos.Y + height - 1}, Max: image.Point{X: pos.X + width, Y: pos.Y + height}},
+		{Min: pos, Max: image.Point{X: pos.X + 1, Y: pos.Y + height}},
+		{Min: image.Point{X: pos.X + width - 1, Y: pos.Y}, Max: image.Point{X: pos.X + width, Y: pos.Y + height}},
 	} {
 		paint.FillShape(gtx.Ops, color.NRGBA{R: 80, G: 80, B: 90, A: 255}, edge.Op())
 	}
+}
 
-	// Draw menu items
-	for i, item := range w.contextMenu.items {
-		itemY := pos.Y + i*itemHeight
-		itemRect := clip.Rect{
-			Min: image.Point{X: pos.X + 1, Y: itemY + 1},
-			Max: image.Point{X: pos.X + menuWidth - 1, Y: itemY + itemHeight},
+// drawMenuItem draws a single menu item with hover/click handling
+func (w *ControlWindow) drawMenuItem(gtx layout.Context, item *menuItem, x, y, width, height int) {
+	itemRect := clip.Rect{
+		Min: image.Point{X: x + 1, Y: y + 1},
+		Max: image.Point{X: x + width - 1, Y: y + height},
+	}
+
+	itemStack := itemRect.Push(gtx.Ops)
+	event.Op(gtx.Ops, item)
+	for {
+		ev, ok := gtx.Event(
+			pointer.Filter{Target: item, Kinds: pointer.Press | pointer.Enter | pointer.Leave},
+		)
+		if !ok {
+			break
 		}
-
-		// Handle item input
-		itemStack := itemRect.Push(gtx.Ops)
-		event.Op(gtx.Ops, item)
-
-		for {
-			ev, ok := gtx.Event(
-				pointer.Filter{Target: item, Kinds: pointer.Press | pointer.Enter | pointer.Leave},
-			)
-			if !ok {
-				break
-			}
-			switch e := ev.(type) {
-			case pointer.Event:
-				switch e.Kind {
-				case pointer.Enter:
-					item.hovered = true
-				case pointer.Leave:
-					item.hovered = false
-				case pointer.Press:
-					if item.action != nil {
-						item.action()
-					}
+		if e, ok := ev.(pointer.Event); ok {
+			switch e.Kind {
+			case pointer.Enter:
+				item.hovered = true
+			case pointer.Leave:
+				item.hovered = false
+			case pointer.Press:
+				if item.action != nil {
+					item.action()
 				}
 			}
 		}
-		itemStack.Pop()
-
-		// Draw hover highlight
-		if item.hovered {
-			hoverRect := clip.Rect{
-				Min: image.Point{X: pos.X + 2, Y: itemY + 1},
-				Max: image.Point{X: pos.X + menuWidth - 2, Y: itemY + itemHeight - 1},
-			}.Op()
-			paint.FillShape(gtx.Ops, color.NRGBA{R: 80, G: 120, B: 200, A: 255}, hoverRect)
-		}
-
-		// Draw item label
-		label := material.Label(w.theme, unit.Sp(13), item.label)
-		if item.hovered {
-			label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
-		} else {
-			label.Color = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
-		}
-
-		labelStack := op.Offset(image.Pt(pos.X+12, itemY+6)).Push(gtx.Ops)
-		labelGtx := gtx
-		labelGtx.Constraints = layout.Constraints{
-			Min: image.Point{},
-			Max: image.Point{X: menuWidth - 24, Y: itemHeight},
-		}
-		label.Layout(labelGtx)
-		labelStack.Pop()
 	}
+	itemStack.Pop()
+
+	// Hover highlight
+	if item.hovered {
+		hoverRect := clip.Rect{
+			Min: image.Point{X: x + 2, Y: y + 1},
+			Max: image.Point{X: x + width - 2, Y: y + height - 1},
+		}.Op()
+		paint.FillShape(gtx.Ops, color.NRGBA{R: 80, G: 120, B: 200, A: 255}, hoverRect)
+	}
+
+	// Label
+	label := material.Label(w.theme, unit.Sp(13), item.label)
+	if item.hovered {
+		label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	} else {
+		label.Color = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
+	}
+	labelStack := op.Offset(image.Pt(x+12, y+6)).Push(gtx.Ops)
+	labelGtx := gtx
+	labelGtx.Constraints = layout.Constraints{
+		Min: image.Point{},
+		Max: image.Point{X: width - 24, Y: height},
+	}
+	label.Layout(labelGtx)
+	labelStack.Pop()
 }
 
 // Close closes the control window

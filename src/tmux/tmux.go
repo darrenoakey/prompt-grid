@@ -42,9 +42,10 @@ func EnsureInstalled() error {
 }
 
 // NewSession creates a new tmux session with the given name and size.
-// For SSH sessions, sshHost is set as the initial command.
+// workDir sets the initial working directory (empty = tmux default).
+// cmd is an optional initial command (e.g., ["ssh", "host"]).
 // The session is created detached and configured to be invisible (no status bar, no prefix key).
-func NewSession(name, sshHost string, cols, rows uint16) error {
+func NewSession(name, workDir string, cols, rows uint16, cmd ...string) error {
 	args := []string{
 		"-L", ServerName(),
 		"new-session", "-d",
@@ -53,29 +54,44 @@ func NewSession(name, sshHost string, cols, rows uint16) error {
 		"-y", fmt.Sprintf("%d", rows),
 	}
 
-	if sshHost != "" {
-		args = append(args, "ssh", sshHost)
+	if workDir != "" {
+		args = append(args, "-c", workDir)
 	}
 
-	cmd := exec.Command("tmux", args...)
-	cmd.Env = append(os.Environ(),
+	if len(cmd) > 0 {
+		args = append(args, cmd...)
+	}
+
+	tmuxCmd := exec.Command("tmux", args...)
+	tmuxCmd.Env = append(os.Environ(),
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := tmuxCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux new-session failed: %w: %s", err, out)
 	}
 
-	// Configure session to be invisible: status off, prefix none, unbind all keys
-	for _, setting := range [][]string{
-		{"-L", ServerName(), "set-option", "-t", name, "status", "off"},
-		{"-L", ServerName(), "set-option", "-t", name, "prefix", "None"},
-		{"-L", ServerName(), "unbind-key", "-t", name, "-a"},
-	} {
-		cmd := exec.Command("tmux", setting...)
-		cmd.Run() // best-effort
-	}
+	// Configure session to be invisible: status off, prefix none, unbind all keys.
+	// Combined into a single tmux invocation using ";" command separator.
+	configCmd := exec.Command("tmux",
+		"-L", ServerName(),
+		"set-option", "-t", name, "status", "off", ";",
+		"set-option", "-t", name, "prefix", "None", ";",
+		"unbind-key", "-t", name, "-a",
+	)
+	configCmd.Run() // best-effort
 
+	return nil
+}
+
+// SendKeys sends keystrokes to a tmux session
+func SendKeys(name string, keys ...string) error {
+	args := []string{"-L", ServerName(), "send-keys", "-t", name}
+	args = append(args, keys...)
+	cmd := exec.Command("tmux", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux send-keys failed: %w: %s", err, out)
+	}
 	return nil
 }
 

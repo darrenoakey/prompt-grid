@@ -46,7 +46,7 @@ func TestNewApp(t *testing.T) {
 func TestAppNewSession(t *testing.T) {
 	app := NewApp(nil, "")
 
-	state, err := app.NewSession("test-session", "")
+	state, err := app.NewSession("test-session", "", "")
 	if err != nil {
 		t.Fatalf("NewSession() error = %v", err)
 	}
@@ -72,13 +72,13 @@ func TestAppNewSession(t *testing.T) {
 func TestAppDuplicateSession(t *testing.T) {
 	app := NewApp(nil, "")
 
-	_, err := app.NewSession("test-dup", "")
+	_, err := app.NewSession("test-dup", "", "")
 	if err != nil {
 		t.Fatalf("First NewSession() error = %v", err)
 	}
 	defer app.CloseSession("test-dup")
 
-	_, err = app.NewSession("test-dup", "")
+	_, err = app.NewSession("test-dup", "", "")
 	if err == nil {
 		t.Error("Second NewSession() should have failed")
 	}
@@ -89,7 +89,7 @@ func TestAppDuplicateSession(t *testing.T) {
 func TestAppGetSession(t *testing.T) {
 	app := NewApp(nil, "")
 
-	_, _ = app.NewSession("test-get", "")
+	_, _ = app.NewSession("test-get", "", "")
 	defer app.CloseSession("test-get")
 
 	state := app.GetSession("test-get")
@@ -110,9 +110,9 @@ func TestAppListSessions(t *testing.T) {
 
 	initial := len(app.ListSessions())
 
-	app.NewSession("alpha-list", "")
+	app.NewSession("alpha-list", "", "")
 	defer app.CloseSession("alpha-list")
-	app.NewSession("beta-list", "")
+	app.NewSession("beta-list", "", "")
 	defer app.CloseSession("beta-list")
 
 	list := app.ListSessions()

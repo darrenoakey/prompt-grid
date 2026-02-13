@@ -3,6 +3,8 @@ package gui
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -347,8 +349,9 @@ func (a *App) FontSize() unit.Sp {
 	return a.fontSize
 }
 
-// NewSession creates a new session by creating a tmux session and attaching via PTY
-func (a *App) NewSession(name string, sshHost string) (*SessionState, error) {
+// NewSession creates a new session by creating a tmux session and attaching via PTY.
+// workDir sets the initial working directory (empty = tmux default).
+func (a *App) NewSession(name, sshHost, workDir string) (*SessionState, error) {
 	a.mu.Lock()
 	if _, exists := a.sessions[name]; exists {
 		a.mu.Unlock()
@@ -359,7 +362,11 @@ func (a *App) NewSession(name string, sshHost string) (*SessionState, error) {
 	// Create tmux session
 	cols := uint16(120)
 	rows := uint16(24)
-	if err := tmux.NewSession(name, sshHost, cols, rows); err != nil {
+	var initialCmd []string
+	if sshHost != "" {
+		initialCmd = []string{"ssh", sshHost}
+	}
+	if err := tmux.NewSession(name, workDir, cols, rows, initialCmd...); err != nil {
 		return nil, err
 	}
 
@@ -699,8 +706,15 @@ func (a *App) IsDiscordConnected() bool {
 // AddSession creates a new session and shows it in the control center.
 // This is the main entry point for adding sessions (both initial and via IPC).
 func (a *App) AddSession(name string, sshHost string) error {
+	// Default workDir to ~/src for non-SSH sessions
+	workDir := ""
+	if sshHost == "" {
+		home, _ := os.UserHomeDir()
+		workDir = filepath.Join(home, "src")
+	}
+
 	// Create and start session (creates tmux session, attaches via PTY)
-	_, err := a.NewSession(name, sshHost)
+	_, err := a.NewSession(name, sshHost, workDir)
 	if err != nil {
 		return err
 	}
@@ -710,5 +724,21 @@ func (a *App) AddSession(name string, sshHost string) error {
 		a.controlWin.Invalidate()
 	}
 
+	return nil
+}
+
+// AddClaudeSession creates a new session running Claude in the given directory.
+func (a *App) AddClaudeSession(name, dir string) error {
+	_, err := a.NewSession(name, "", dir)
+	if err != nil {
+		return err
+	}
+
+	// Send "claude" command to the session's shell
+	tmux.SendKeys(name, "claude", "Enter")
+
+	if a.controlWin != nil {
+		a.controlWin.Invalidate()
+	}
 	return nil
 }

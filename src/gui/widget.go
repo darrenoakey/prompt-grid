@@ -34,6 +34,7 @@ type TerminalWidget struct {
 	cellH        int
 	focused      bool
 	requestFocus bool // Set by parent to request focus each frame
+	skipKeyboard bool // When true, parent handles keyboard (used in control center)
 }
 
 // NewTerminalWidget creates a new terminal widget
@@ -163,8 +164,11 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 				switch e.Kind {
 				case pointer.Press:
 					w.focused = true
-					// Request keyboard focus when clicked
-					gtx.Execute(key.FocusCmd{Tag: w})
+					if !w.skipKeyboard {
+						// Request keyboard focus when clicked (standalone window only).
+						// In control center, the parent handles keyboard focus.
+						gtx.Execute(key.FocusCmd{Tag: w})
+					}
 					w.state.StartSelection(cellX, cellY)
 				case pointer.Drag:
 					w.state.UpdateSelection(cellX, cellY)
@@ -185,91 +189,95 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 		}
 	}
 
-	// Process focus events
-	for {
-		ev, ok := gtx.Event(
-			key.FocusFilter{Target: w},
-		)
-		if !ok {
-			break
-		}
-		if e, ok := ev.(key.FocusEvent); ok {
-			w.focused = e.Focus
-		}
-	}
-
-	// Process all key events
-	// Tab must be explicitly named — Gio intercepts unnamed Tab as a focus-navigation SystemEvent
-	// Cmd+C/V/X must be explicitly named — Gio intercepts them as system clipboard shortcuts
-	for {
-		ev, ok := gtx.Event(
-			key.Filter{Optional: key.ModShift | key.ModCtrl | key.ModCommand},
-			key.Filter{Name: key.NameTab},
-			key.Filter{Name: "C", Required: key.ModCommand},
-			key.Filter{Name: "V", Required: key.ModCommand},
-			key.Filter{Name: "X", Required: key.ModCommand},
-		)
-		if !ok {
-			break
-		}
-		switch e := ev.(type) {
-		case key.EditEvent:
-			// Clear selection on any text input
-			w.state.ClearSelection()
-			if len(e.Text) > 0 {
-				w.state.pty.Write([]byte(e.Text))
+	// When skipKeyboard is true, the parent (ControlWindow) handles all keyboard/clipboard.
+	// The widget only handles pointer events (selection, scroll) above.
+	if !w.skipKeyboard {
+		// Process focus events
+		for {
+			ev, ok := gtx.Event(
+				key.FocusFilter{Target: w},
+			)
+			if !ok {
+				break
 			}
-		case key.Event:
-			if e.State == key.Press {
-				// Handle Cmd+C for copy
-				if e.Modifiers.Contain(key.ModCommand) && e.Name == "C" {
-					if w.state.HasSelection() {
-						selectedText := w.state.GetSelectedText()
-						if len(selectedText) > 0 {
-							gtx.Execute(clipboard.WriteCmd{
-								Type: "text/plain",
-								Data: io.NopCloser(strings.NewReader(selectedText)),
-							})
+			if e, ok := ev.(key.FocusEvent); ok {
+				w.focused = e.Focus
+			}
+		}
+
+		// Process all key events
+		// Tab must be explicitly named — Gio intercepts unnamed Tab as a focus-navigation SystemEvent
+		// Cmd+C/V/X must be explicitly named — Gio intercepts them as system clipboard shortcuts
+		for {
+			ev, ok := gtx.Event(
+				key.Filter{Optional: key.ModShift | key.ModCtrl | key.ModCommand},
+				key.Filter{Name: key.NameTab},
+				key.Filter{Name: "C", Required: key.ModCommand},
+				key.Filter{Name: "V", Required: key.ModCommand},
+				key.Filter{Name: "X", Required: key.ModCommand},
+			)
+			if !ok {
+				break
+			}
+			switch e := ev.(type) {
+			case key.EditEvent:
+				// Clear selection on any text input
+				w.state.ClearSelection()
+				if len(e.Text) > 0 {
+					w.state.pty.Write([]byte(e.Text))
+				}
+			case key.Event:
+				if e.State == key.Press {
+					// Handle Cmd+C for copy
+					if e.Modifiers.Contain(key.ModCommand) && e.Name == "C" {
+						if w.state.HasSelection() {
+							selectedText := w.state.GetSelectedText()
+							if len(selectedText) > 0 {
+								gtx.Execute(clipboard.WriteCmd{
+									Type: "text/plain",
+									Data: io.NopCloser(strings.NewReader(selectedText)),
+								})
+							}
 						}
-					}
-				} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "X" {
-					// Cmd+X for cut (copy selection, then clear it)
-					if w.state.HasSelection() {
-						selectedText := w.state.GetSelectedText()
-						if len(selectedText) > 0 {
-							gtx.Execute(clipboard.WriteCmd{
-								Type: "text/plain",
-								Data: io.NopCloser(strings.NewReader(selectedText)),
-							})
+					} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "X" {
+						// Cmd+X for cut (copy selection, then clear it)
+						if w.state.HasSelection() {
+							selectedText := w.state.GetSelectedText()
+							if len(selectedText) > 0 {
+								gtx.Execute(clipboard.WriteCmd{
+									Type: "text/plain",
+									Data: io.NopCloser(strings.NewReader(selectedText)),
+								})
+							}
+							w.state.ClearSelection()
 						}
+					} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "V" {
+						// Cmd+V for paste - request clipboard read
+						gtx.Execute(clipboard.ReadCmd{Tag: w})
+					} else {
 						w.state.ClearSelection()
+						w.handleKeyEvent(e)
 					}
-				} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "V" {
-					// Cmd+V for paste - request clipboard read
-					gtx.Execute(clipboard.ReadCmd{Tag: w})
-				} else {
-					w.state.ClearSelection()
-					w.handleKeyEvent(e)
 				}
 			}
 		}
-	}
 
-	// Process clipboard paste events
-	for {
-		ev, ok := gtx.Event(
-			transfer.TargetFilter{Target: w, Type: "text/plain"},
-		)
-		if !ok {
-			break
-		}
-		if e, ok := ev.(transfer.DataEvent); ok {
-			data := e.Open()
-			if data != nil {
-				content, _ := io.ReadAll(data)
-				data.Close()
-				if len(content) > 0 {
-					w.state.pty.Write(content)
+		// Process clipboard paste events
+		for {
+			ev, ok := gtx.Event(
+				transfer.TargetFilter{Target: w, Type: "text/plain"},
+			)
+			if !ok {
+				break
+			}
+			if e, ok := ev.(transfer.DataEvent); ok {
+				data := e.Open()
+				if data != nil {
+					content, _ := io.ReadAll(data)
+					data.Close()
+					if len(content) > 0 {
+						w.state.pty.Write(content)
+					}
 				}
 			}
 		}
