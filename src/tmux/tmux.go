@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 const (
@@ -41,6 +42,22 @@ func EnsureInstalled() error {
 	return nil
 }
 
+// serverConfigOnce ensures global tmux server options are set exactly once.
+var serverConfigOnce sync.Once
+
+// ConfigureServer sets global options on the tmux server (status off, prefix disabled).
+// Safe to call multiple times — uses sync.Once internally.
+func ConfigureServer() {
+	serverConfigOnce.Do(func() {
+		cmd := exec.Command("tmux",
+			"-L", ServerName(),
+			"set-option", "-g", "status", "off", ";",
+			"set-option", "-g", "prefix", "None",
+		)
+		cmd.Run() // best-effort
+	})
+}
+
 // NewSession creates a new tmux session with the given name and size.
 // workDir sets the initial working directory (empty = tmux default).
 // cmd is an optional initial command (e.g., ["ssh", "host"]).
@@ -71,15 +88,8 @@ func NewSession(name, workDir string, cols, rows uint16, cmd ...string) error {
 		return fmt.Errorf("tmux new-session failed: %w: %s", err, out)
 	}
 
-	// Configure session to be invisible: status off, prefix none, unbind all keys.
-	// Combined into a single tmux invocation using ";" command separator.
-	configCmd := exec.Command("tmux",
-		"-L", ServerName(),
-		"set-option", "-t", name, "status", "off", ";",
-		"set-option", "-t", name, "prefix", "None", ";",
-		"unbind-key", "-t", name, "-a",
-	)
-	configCmd.Run() // best-effort
+	// Set global server options once (status off, prefix disabled).
+	ConfigureServer()
 
 	return nil
 }

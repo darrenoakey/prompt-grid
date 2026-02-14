@@ -179,7 +179,7 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 						selectedText := w.state.GetSelectedText()
 						if len(selectedText) > 0 {
 							gtx.Execute(clipboard.WriteCmd{
-								Type: "text/plain",
+								Type: "application/text",
 								Data: io.NopCloser(strings.NewReader(selectedText)),
 							})
 						}
@@ -234,7 +234,7 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 							selectedText := w.state.GetSelectedText()
 							if len(selectedText) > 0 {
 								gtx.Execute(clipboard.WriteCmd{
-									Type: "text/plain",
+									Type: "application/text",
 									Data: io.NopCloser(strings.NewReader(selectedText)),
 								})
 							}
@@ -245,7 +245,7 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 							selectedText := w.state.GetSelectedText()
 							if len(selectedText) > 0 {
 								gtx.Execute(clipboard.WriteCmd{
-									Type: "text/plain",
+									Type: "application/text",
 									Data: io.NopCloser(strings.NewReader(selectedText)),
 								})
 							}
@@ -265,7 +265,7 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 		// Process clipboard paste events
 		for {
 			ev, ok := gtx.Event(
-				transfer.TargetFilter{Target: w, Type: "text/plain"},
+				transfer.TargetFilter{Target: w, Type: "application/text"},
 			)
 			if !ok {
 				break

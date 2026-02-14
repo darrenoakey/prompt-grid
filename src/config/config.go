@@ -6,11 +6,19 @@ import (
 	"path/filepath"
 )
 
+// SessionInfo describes a session for persistence across restarts
+type SessionInfo struct {
+	Type    string `json:"type"`               // "shell", "ssh", "claude"
+	WorkDir string `json:"work_dir,omitempty"`
+	SSHHost string `json:"ssh_host,omitempty"`
+}
+
 // Config holds application configuration
 type Config struct {
-	Discord       DiscordConfig  `json:"discord"`
-	SessionColors map[string]int `json:"session_colors,omitempty"`
-	WindowSizes   map[string][2]int `json:"window_sizes,omitempty"`
+	Discord       DiscordConfig        `json:"discord"`
+	SessionColors map[string]int       `json:"session_colors,omitempty"`
+	WindowSizes   map[string][2]int    `json:"window_sizes,omitempty"`
+	Sessions      map[string]SessionInfo `json:"sessions,omitempty"`
 }
 
 // DiscordConfig holds Discord-specific configuration
@@ -71,6 +79,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.ensureSessionColors()
+	cfg.ensureSessions()
 	return &cfg, nil
 }
 
@@ -142,6 +151,51 @@ func (c *Config) RenameWindowSize(oldName, newName string) {
 		c.WindowSizes[newName] = size
 		delete(c.WindowSizes, oldName)
 	}
+}
+
+// ensureSessions initializes the Sessions map if nil
+func (c *Config) ensureSessions() {
+	if c.Sessions == nil {
+		c.Sessions = make(map[string]SessionInfo)
+	}
+}
+
+// GetSessionInfo returns the saved session info for a name
+func (c *Config) GetSessionInfo(name string) (SessionInfo, bool) {
+	c.ensureSessions()
+	info, ok := c.Sessions[name]
+	return info, ok
+}
+
+// SetSessionInfo saves session info for a name
+func (c *Config) SetSessionInfo(name string, info SessionInfo) {
+	c.ensureSessions()
+	c.Sessions[name] = info
+}
+
+// DeleteSessionInfo removes session info for a name
+func (c *Config) DeleteSessionInfo(name string) {
+	c.ensureSessions()
+	delete(c.Sessions, name)
+}
+
+// RenameSessionInfo moves session info from oldName to newName
+func (c *Config) RenameSessionInfo(oldName, newName string) {
+	c.ensureSessions()
+	if info, ok := c.Sessions[oldName]; ok {
+		c.Sessions[newName] = info
+		delete(c.Sessions, oldName)
+	}
+}
+
+// AllSessions returns a copy of the sessions map
+func (c *Config) AllSessions() map[string]SessionInfo {
+	c.ensureSessions()
+	result := make(map[string]SessionInfo, len(c.Sessions))
+	for k, v := range c.Sessions {
+		result[k] = v
+	}
+	return result
 }
 
 // LoadDefault loads configuration from the default path

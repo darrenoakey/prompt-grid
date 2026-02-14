@@ -1,11 +1,15 @@
 package gui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"claude-term/src/config"
+	"claude-term/src/ptylog"
 	"claude-term/src/tmux"
 )
 
@@ -184,4 +188,256 @@ func TestTmuxSessionLifecycle(t *testing.T) {
 	if tmux.HasSession(name) {
 		t.Error("Session should not exist after kill")
 	}
+}
+
+func TestSessionMetadataPersistence(t *testing.T) {
+	// Create a temp config file
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "claude-term", "config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0755)
+	cfg := &config.Config{}
+
+	app := NewApp(cfg, cfgPath)
+
+	// Create a session
+	_, err := app.NewSession("test-meta", "", "/tmp")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer app.CloseSession("test-meta")
+
+	// Verify session info was saved
+	info, ok := cfg.GetSessionInfo("test-meta")
+	if !ok {
+		t.Fatal("session info should exist after NewSession")
+	}
+	if info.Type != "shell" {
+		t.Errorf("type = %q, want %q", info.Type, "shell")
+	}
+	if info.WorkDir != "/tmp" {
+		t.Errorf("workdir = %q, want %q", info.WorkDir, "/tmp")
+	}
+
+	// Verify config was written to disk
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var diskCfg config.Config
+	json.Unmarshal(data, &diskCfg)
+	diskInfo, ok := diskCfg.Sessions["test-meta"]
+	if !ok {
+		t.Fatal("session info should be on disk")
+	}
+	if diskInfo.Type != "shell" {
+		t.Errorf("disk type = %q, want %q", diskInfo.Type, "shell")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestSessionMetadataDeletedOnClose(t *testing.T) {
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "claude-term", "config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0755)
+	cfg := &config.Config{}
+
+	app := NewApp(cfg, cfgPath)
+
+	_, err := app.NewSession("test-meta-del", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	// Close the session
+	app.CloseSession("test-meta-del")
+
+	// Verify metadata removed
+	_, ok := cfg.GetSessionInfo("test-meta-del")
+	if ok {
+		t.Error("session info should be deleted after CloseSession")
+	}
+
+	// Verify PTY log removed
+	if _, err := os.Stat(ptylog.LogPath("test-meta-del")); !os.IsNotExist(err) {
+		t.Error("PTY log should be deleted after CloseSession")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestSessionMetadataRename(t *testing.T) {
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "claude-term", "config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0755)
+	cfg := &config.Config{}
+
+	app := NewApp(cfg, cfgPath)
+
+	_, err := app.NewSession("test-ren-old", "", "/tmp")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer app.CloseSession("test-ren-new") // cleanup under new name
+
+	err = app.RenameSession("test-ren-old", "test-ren-new")
+	if err != nil {
+		t.Fatalf("RenameSession: %v", err)
+	}
+
+	// Old metadata gone
+	_, ok := cfg.GetSessionInfo("test-ren-old")
+	if ok {
+		t.Error("old session info should be gone after rename")
+	}
+
+	// New metadata present
+	info, ok := cfg.GetSessionInfo("test-ren-new")
+	if !ok {
+		t.Fatal("new session info should exist after rename")
+	}
+	if info.WorkDir != "/tmp" {
+		t.Errorf("workdir = %q, want /tmp", info.WorkDir)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestPtyLogCreatedWithSession(t *testing.T) {
+	app := NewApp(nil, "")
+
+	_, err := app.NewSession("test-ptylog", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer app.CloseSession("test-ptylog")
+
+	state := app.GetSession("test-ptylog")
+	if state == nil {
+		t.Fatal("session should exist")
+	}
+	if state.ptyLog == nil {
+		t.Error("ptyLog should be non-nil after NewSession")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestSessionRecreateAfterTmuxDeath(t *testing.T) {
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "claude-term", "config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0755)
+	cfg := &config.Config{}
+
+	app := NewApp(cfg, cfgPath)
+
+	// Create a session
+	_, err := app.NewSession("test-recreate", "", "/tmp")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	// Verify session info was saved
+	info, ok := cfg.GetSessionInfo("test-recreate")
+	if !ok {
+		t.Fatal("session info should exist after NewSession")
+	}
+	if info.Type != "shell" {
+		t.Errorf("type = %q, want shell", info.Type)
+	}
+
+	// Directly write PTY log data that produces scrollback when replayed
+	// (50+ lines of output to overflow a 24-row screen)
+	state := app.GetSession("test-recreate")
+	if state.ptyLog != nil {
+		state.ptyLog.Close()
+	}
+	var logData []byte
+	for i := 1; i <= 50; i++ {
+		logData = append(logData, []byte(fmt.Sprintf("Line %d\r\n", i))...)
+	}
+	os.WriteFile(ptylog.LogPath("test-recreate"), logData, 0644)
+
+	// Kill tmux session to simulate reboot
+	if state.pty != nil {
+		state.pty.Close()
+	}
+	tmux.KillSession("test-recreate")
+	time.Sleep(200 * time.Millisecond)
+
+	// Remove the old app session (simulating app restart)
+	app.mu.Lock()
+	delete(app.sessions, "test-recreate")
+	app.mu.Unlock()
+
+	// Create a new App which will discover + recreate dead sessions
+	app2 := NewApp(cfg, cfgPath)
+
+	// The session should have been recreated
+	state2 := app2.GetSession("test-recreate")
+	if state2 == nil {
+		t.Fatal("session should be recreated after tmux death")
+	}
+
+	// Verify tmux session exists again
+	if !tmux.HasSession("test-recreate") {
+		t.Error("tmux session should exist after recreation")
+	}
+
+	// Verify scrollback was restored from PTY log replay
+	if state2.Scrollback().Count() == 0 {
+		t.Error("scrollback should be restored from PTY log replay")
+	}
+
+	// Cleanup
+	app2.CloseSession("test-recreate")
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestReconnectSessionRestoresScrollback(t *testing.T) {
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "claude-term", "config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0755)
+	cfg := &config.Config{}
+
+	app := NewApp(cfg, cfgPath)
+
+	// Create session (tmux session stays alive)
+	_, err := app.NewSession("test-reconnect-sb", "", "/tmp")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	// Write a PTY log with enough data to produce scrollback
+	state := app.GetSession("test-reconnect-sb")
+	if state.ptyLog != nil {
+		state.ptyLog.Close()
+	}
+	var logData []byte
+	for i := 1; i <= 50; i++ {
+		logData = append(logData, []byte(fmt.Sprintf("Line %d\r\n", i))...)
+	}
+	os.WriteFile(ptylog.LogPath("test-reconnect-sb"), logData, 0644)
+
+	// Close the app-side session (but keep tmux alive)
+	if state.pty != nil {
+		state.pty.Close()
+	}
+	app.mu.Lock()
+	delete(app.sessions, "test-reconnect-sb")
+	app.mu.Unlock()
+
+	// Reconnect (like app restart with tmux still running)
+	err = app.reconnectSession("test-reconnect-sb")
+	if err != nil {
+		t.Fatalf("reconnectSession: %v", err)
+	}
+	defer app.CloseSession("test-reconnect-sb")
+
+	state2 := app.GetSession("test-reconnect-sb")
+	if state2 == nil {
+		t.Fatal("session should exist after reconnect")
+	}
+
+	// Scrollback should have been restored from log replay
+	if state2.Scrollback().Count() == 0 {
+		t.Error("scrollback should be restored from PTY log on reconnect")
+	}
+
+	time.Sleep(100 * time.Millisecond)
 }

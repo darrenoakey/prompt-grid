@@ -15,6 +15,7 @@ import (
 	"claude-term/src/config"
 	"claude-term/src/emulator"
 	"claude-term/src/pty"
+	"claude-term/src/ptylog"
 	"claude-term/src/render"
 	"claude-term/src/tmux"
 )
@@ -54,6 +55,7 @@ type SessionState struct {
 	scrollback *emulator.Scrollback
 	window     *TerminalWindow
 	colors     render.SessionColor // Unique color for this session
+	ptyLog     *ptylog.Writer      // PTY output logger for persistence
 
 	// Scrollback viewing state
 	scrollOffset int // Lines scrolled up from bottom (0 = viewing live terminal)
@@ -252,12 +254,55 @@ func NewApp(cfg *config.Config, cfgPath string) *App {
 	return a
 }
 
-// discoverSessions finds and reconnects to existing tmux sessions
+// discoverSessions finds and reconnects to existing tmux sessions,
+// and recreates sessions that died (e.g., after reboot) from saved config.
 func (a *App) discoverSessions() {
 	names, _ := tmux.ListSessions()
+	if len(names) > 0 {
+		// Server is already running — ensure global options are set
+		tmux.ConfigureServer()
+	}
+
+	// Track which sessions are live in tmux
+	liveSet := make(map[string]bool, len(names))
 	for _, name := range names {
+		liveSet[name] = true
 		a.reconnectSession(name)
 	}
+
+	// Recreate sessions from config that aren't live (died in reboot)
+	if a.config != nil {
+		for name, info := range a.config.AllSessions() {
+			if !liveSet[name] {
+				a.recreateSession(name, info)
+			}
+		}
+	}
+}
+
+// setupSessionCallbacks connects PTY data/exit callbacks to parser and log writer.
+// Shared between reconnectSession, NewSession, and recreateSession.
+func (a *App) setupSessionCallbacks(state *SessionState, name string) {
+	state.pty.SetOnData(func(data []byte) {
+		state.parser.Parse(data)
+		if state.ptyLog != nil {
+			state.ptyLog.Write(data)
+		}
+		state.ResetScrollOffset() // Snap to bottom on new output
+		a.invalidateSession(name)
+	})
+
+	state.pty.SetOnExit(func(err error) {
+		// PTY exited - check if tmux session still exists (detach vs death)
+		if !tmux.HasSession(name) {
+			a.mu.Lock()
+			delete(a.sessions, name)
+			a.mu.Unlock()
+			if a.controlWin != nil {
+				a.controlWin.Invalidate()
+			}
+		}
+	})
 }
 
 // reconnectSession connects to an existing tmux session
@@ -273,6 +318,12 @@ func (a *App) reconnectSession(name string) error {
 	scrollback := emulator.NewScrollback()
 	parser := emulator.NewParser(screen, scrollback)
 
+	// Replay saved PTY log to restore scrollback
+	ptylog.ReplayLog(name, parser)
+
+	// Start PTY log writer
+	logWriter, _ := ptylog.NewWriter(name)
+
 	// Look up or assign session color
 	sessionColor := a.resolveSessionColor(name)
 
@@ -283,36 +334,102 @@ func (a *App) reconnectSession(name string) error {
 		screen:     screen,
 		scrollback: scrollback,
 		colors:     sessionColor,
+		ptyLog:     logWriter,
 	}
 
-	// Connect PTY data to parser
-	ptySess.SetOnData(func(data []byte) {
-		parser.Parse(data)
-		state.ResetScrollOffset() // Snap to bottom on new output
-		a.invalidateSession(name)
-	})
+	// Connect callbacks
+	a.setupSessionCallbacks(state, name)
 
-	ptySess.SetOnExit(func(err error) {
-		// PTY exited - check if tmux session still exists (detach vs death)
-		if !tmux.HasSession(name) {
-			a.mu.Lock()
-			delete(a.sessions, name)
-			a.mu.Unlock()
-			if a.controlWin != nil {
-				a.controlWin.Invalidate()
-			}
+	// Ensure session metadata exists in config (backward compat for pre-existing sessions)
+	if a.config != nil {
+		if _, ok := a.config.GetSessionInfo(name); !ok {
+			a.config.SetSessionInfo(name, config.SessionInfo{Type: "shell"})
+			a.saveConfig()
 		}
-	})
+	}
 
 	// Start PTY with tmux attach
 	cmd, args := tmux.AttachArgs(name)
 	if err := ptySess.StartCommand(cmd, args); err != nil {
+		if logWriter != nil {
+			logWriter.Close()
+		}
 		return err
 	}
 
 	a.mu.Lock()
 	a.sessions[name] = state
 	a.mu.Unlock()
+
+	return nil
+}
+
+// recreateSession creates a new tmux session from saved config (after reboot).
+// It replays the PTY log to restore scrollback, then starts a fresh shell/ssh/claude.
+func (a *App) recreateSession(name string, info config.SessionInfo) error {
+	cols := uint16(120)
+	rows := uint16(24)
+
+	// Create tmux session with saved parameters
+	var initialCmd []string
+	workDir := info.WorkDir
+	if info.SSHHost != "" {
+		initialCmd = []string{"ssh", info.SSHHost}
+		workDir = "" // SSH sessions don't use local workDir
+	}
+	if err := tmux.NewSession(name, workDir, cols, rows, initialCmd...); err != nil {
+		return err
+	}
+
+	ptySess := pty.NewSession(name)
+
+	// Create emulator components
+	screen := emulator.NewScreen(int(cols), int(rows))
+	scrollback := emulator.NewScrollback()
+	parser := emulator.NewParser(screen, scrollback)
+
+	// Replay saved PTY log to restore scrollback
+	ptylog.ReplayLog(name, parser)
+
+	// Start PTY log writer
+	logWriter, _ := ptylog.NewWriter(name)
+
+	// Look up or assign session color
+	sessionColor := a.resolveSessionColor(name)
+
+	state := &SessionState{
+		pty:        ptySess,
+		name:       name,
+		sshHost:    info.SSHHost,
+		parser:     parser,
+		screen:     screen,
+		scrollback: scrollback,
+		colors:     sessionColor,
+		ptyLog:     logWriter,
+	}
+
+	// Connect callbacks
+	a.setupSessionCallbacks(state, name)
+
+	// Start PTY with tmux attach
+	cmd, args := tmux.AttachArgs(name)
+	if err := ptySess.StartCommand(cmd, args); err != nil {
+		if logWriter != nil {
+			logWriter.Close()
+		}
+		tmux.KillSession(name)
+		return err
+	}
+
+	a.mu.Lock()
+	a.sessions[name] = state
+	a.mu.Unlock()
+
+	// For claude sessions, send the claude command
+	if info.Type == "claude" {
+		claudePath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "claude")
+		tmux.SendKeys(name, claudePath, "Enter")
+	}
 
 	return nil
 }
@@ -378,6 +495,9 @@ func (a *App) NewSession(name, sshHost, workDir string) (*SessionState, error) {
 	scrollback := emulator.NewScrollback()
 	parser := emulator.NewParser(screen, scrollback)
 
+	// Start PTY log writer
+	logWriter, _ := ptylog.NewWriter(name)
+
 	// Look up or assign session color
 	sessionColor := a.resolveSessionColor(name)
 
@@ -389,29 +509,32 @@ func (a *App) NewSession(name, sshHost, workDir string) (*SessionState, error) {
 		screen:     screen,
 		scrollback: scrollback,
 		colors:     sessionColor,
+		ptyLog:     logWriter,
 	}
 
-	// Connect PTY data to parser
-	ptySess.SetOnData(func(data []byte) {
-		parser.Parse(data)
-		state.ResetScrollOffset() // Snap to bottom on new output
-		a.invalidateSession(name)
-	})
+	// Connect callbacks
+	a.setupSessionCallbacks(state, name)
 
-	ptySess.SetOnExit(func(err error) {
-		if !tmux.HasSession(name) {
-			a.mu.Lock()
-			delete(a.sessions, name)
-			a.mu.Unlock()
-			if a.controlWin != nil {
-				a.controlWin.Invalidate()
-			}
+	// Save session metadata
+	if a.config != nil {
+		sessionType := "shell"
+		if sshHost != "" {
+			sessionType = "ssh"
 		}
-	})
+		a.config.SetSessionInfo(name, config.SessionInfo{
+			Type:    sessionType,
+			WorkDir: workDir,
+			SSHHost: sshHost,
+		})
+		a.saveConfig()
+	}
 
 	// Start PTY with tmux attach
 	cmd, args := tmux.AttachArgs(name)
 	if err := ptySess.StartCommand(cmd, args); err != nil {
+		if logWriter != nil {
+			logWriter.Close()
+		}
 		tmux.KillSession(name) // cleanup on failure
 		return nil, err
 	}
@@ -542,16 +665,22 @@ func (a *App) CloseSession(name string) error {
 		state.window.Close()
 	}
 
+	if state.ptyLog != nil {
+		state.ptyLog.Close()
+	}
+
 	if state.pty != nil {
 		state.pty.Close()
 	}
 
 	tmux.KillSession(actualName)
 
-	// Remove saved color and window size mappings
+	// Remove saved color, window size, session info, and PTY log
+	ptylog.DeleteLog(actualName)
 	if a.config != nil {
 		a.config.DeleteSessionColor(actualName)
 		a.config.DeleteWindowSize(actualName)
+		a.config.DeleteSessionInfo(actualName)
 		a.saveConfig()
 	}
 
@@ -590,15 +719,23 @@ func (a *App) RenameSession(oldName, newName string) error {
 		return err
 	}
 
+	// Close old writer, rename log file, open new writer
+	if state.ptyLog != nil {
+		state.ptyLog.Close()
+	}
+	ptylog.RenameLog(actualName, newName)
+	state.ptyLog, _ = ptylog.NewWriter(newName)
+
 	// Move to new name
 	delete(a.sessions, actualName)
 	state.name = newName
 	a.sessions[newName] = state
 
-	// Move saved color and window size mappings
+	// Move saved color, window size, and session info mappings
 	if a.config != nil {
 		a.config.RenameSessionColor(actualName, newName)
 		a.config.RenameWindowSize(actualName, newName)
+		a.config.RenameSessionInfo(actualName, newName)
 		a.saveConfig()
 	}
 
@@ -734,8 +871,18 @@ func (a *App) AddClaudeSession(name, dir string) error {
 		return err
 	}
 
-	// Send "claude" command to the session's shell
-	tmux.SendKeys(name, "claude", "Enter")
+	// Update session type to "claude" (NewSession saved it as "shell")
+	if a.config != nil {
+		a.config.SetSessionInfo(name, config.SessionInfo{
+			Type:    "claude",
+			WorkDir: dir,
+		})
+		a.saveConfig()
+	}
+
+	// Send claude command to the session's shell (full path for reliability)
+	claudePath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "claude")
+	tmux.SendKeys(name, claudePath, "Enter")
 
 	if a.controlWin != nil {
 		a.controlWin.Invalidate()

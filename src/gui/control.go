@@ -67,10 +67,11 @@ type tabState struct {
 }
 
 type contextMenuState struct {
-	visible     bool
-	sessionName string
-	position    image.Point
-	items       []*menuItem
+	visible         bool
+	sessionName     string
+	position        image.Point
+	items           []*menuItem
+	activeSubmenuIdx int // Index of parent item whose submenu is open (-1 = none)
 }
 
 type menuItem struct {
@@ -209,19 +210,49 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 				inMain := clickX >= pos.X && clickX <= pos.X+menuWidth &&
 					clickY >= pos.Y && clickY <= pos.Y+menuHeight
 
-				// Check if click is in submenu area
+				// Check if click is in submenu area (may span multiple columns)
 				inSub := false
-				for i, item := range w.contextMenu.items {
-					if item.hovered && item.submenu != nil {
-						subX := pos.X + menuWidth + 2
-						subY := pos.Y + i*itemHeight
+				idx := w.contextMenu.activeSubmenuIdx
+				if idx >= 0 && idx < len(w.contextMenu.items) {
+					parent := w.contextMenu.items[idx]
+					if parent.submenu != nil {
+						subX := pos.X + menuWidth
+						submenuY := pos.Y + idx*itemHeight
 						subW := 200
-						subH := len(item.submenu) * itemHeight
-						if clickX >= subX && clickX <= subX+subW &&
-							clickY >= subY && clickY <= subY+subH {
-							inSub = true
+						maxScreenY := gtx.Constraints.Max.Y
+						maxItemsPerCol := maxScreenY / itemHeight
+						if maxItemsPerCol < 1 {
+							maxItemsPerCol = 1
 						}
-						break
+						totalItems := len(parent.submenu)
+						numCols := (totalItems + maxItemsPerCol - 1) / maxItemsPerCol
+						if numCols < 1 {
+							numCols = 1
+						}
+						itemsPerCol := (totalItems + numCols - 1) / numCols
+
+						for col := 0; col < numCols; col++ {
+							colStart := col * itemsPerCol
+							colEnd := colStart + itemsPerCol
+							if colEnd > totalItems {
+								colEnd = totalItems
+							}
+							colItems := colEnd - colStart
+							colX := subX + col*subW
+							colHeight := colItems * itemHeight
+							colY := submenuY
+							if colY+colHeight > maxScreenY {
+								colY = maxScreenY - colHeight
+							}
+							if colY < 0 {
+								colY = 0
+							}
+							if clickX >= colX && clickX <= colX+subW &&
+								clickY >= colY && clickY <= colY+colHeight {
+								inSub = true
+								break
+							}
+						}
 					}
 				}
 
@@ -723,6 +754,7 @@ func (w *ControlWindow) showContextMenu(sessionName string, pos image.Point) {
 	}
 
 	w.contextMenu.items = items
+	w.contextMenu.activeSubmenuIdx = -1
 }
 
 // nextSessionName returns the next available "Session N" name
@@ -918,19 +950,21 @@ func (w *ControlWindow) handleTerminalKeyboard(gtx layout.Context) {
 		}
 		switch e := ev.(type) {
 		case key.EditEvent:
+			fmt.Fprintf(os.Stderr, "PASTE-DBG: EditEvent Text=%q len=%d\n", e.Text, len(e.Text))
 			state.ClearSelection()
 			if len(e.Text) > 0 {
 				state.pty.Write([]byte(e.Text))
 			}
 		case key.Event:
 			if e.State == key.Press {
+				fmt.Fprintf(os.Stderr, "PASTE-DBG: KeyEvent Name=%q Mods=%v State=%v\n", e.Name, e.Modifiers, e.State)
 				if e.Modifiers.Contain(key.ModCommand) && e.Name == "C" {
 					// Cmd+C: copy selection
 					if state.HasSelection() {
 						selectedText := state.GetSelectedText()
 						if len(selectedText) > 0 {
 							gtx.Execute(clipboard.WriteCmd{
-								Type: "text/plain",
+								Type: "application/text",
 								Data: io.NopCloser(strings.NewReader(selectedText)),
 							})
 						}
@@ -941,7 +975,7 @@ func (w *ControlWindow) handleTerminalKeyboard(gtx layout.Context) {
 						selectedText := state.GetSelectedText()
 						if len(selectedText) > 0 {
 							gtx.Execute(clipboard.WriteCmd{
-								Type: "text/plain",
+								Type: "application/text",
 								Data: io.NopCloser(strings.NewReader(selectedText)),
 							})
 						}
@@ -961,16 +995,18 @@ func (w *ControlWindow) handleTerminalKeyboard(gtx layout.Context) {
 	// Process clipboard paste data
 	for {
 		ev, ok := gtx.Event(
-			transfer.TargetFilter{Target: w, Type: "text/plain"},
+			transfer.TargetFilter{Target: w, Type: "application/text"},
 		)
 		if !ok {
 			break
 		}
 		if e, ok := ev.(transfer.DataEvent); ok {
+			fmt.Fprintf(os.Stderr, "PASTE-DBG: DataEvent Type=%q\n", e.Type)
 			data := e.Open()
 			if data != nil {
 				content, _ := io.ReadAll(data)
 				data.Close()
+				fmt.Fprintf(os.Stderr, "PASTE-DBG: DataEvent content=%q len=%d\n", content, len(content))
 				if len(content) > 0 {
 					state.pty.Write(content)
 				}
@@ -1053,34 +1089,70 @@ func (w *ControlWindow) layoutContextMenu(gtx layout.Context) {
 	// Draw menu panel
 	w.drawMenuPanel(gtx, pos, menuWidth, menuHeight)
 
-	// Draw menu items and find active submenu
-	var activeSubmenu []*menuItem
-	var submenuY int
+	// Draw menu items — track which parent should show a submenu.
+	// We use activeSubmenuIdx (sticky) instead of item.hovered to avoid
+	// the submenu disappearing when the mouse crosses the gap to the submenu.
 	for i, item := range w.contextMenu.items {
 		itemY := pos.Y + i*itemHeight
-		w.drawMenuItem(gtx, item, pos.X, itemY, menuWidth, itemHeight)
-		if item.hovered && item.submenu != nil {
-			activeSubmenu = item.submenu
-			submenuY = itemY
+		w.drawMenuItem(gtx, item, pos.X, itemY, menuWidth, itemHeight, false)
+		if item.hovered {
+			if item.submenu != nil {
+				w.contextMenu.activeSubmenuIdx = i
+			} else {
+				w.contextMenu.activeSubmenuIdx = -1
+			}
 		}
 	}
 
-	// Render submenu if active
-	if activeSubmenu != nil {
-		subX := pos.X + menuWidth + 2
-		subWidth := 200
-		subHeight := len(activeSubmenu) * itemHeight
+	// Render submenu if active (no gap — flush against main menu)
+	idx := w.contextMenu.activeSubmenuIdx
+	if idx >= 0 && idx < len(w.contextMenu.items) {
+		parent := w.contextMenu.items[idx]
+		if parent.submenu != nil {
+			subX := pos.X + menuWidth // No gap
+			submenuY := pos.Y + idx*itemHeight
+			subWidth := 200
+			maxScreenY := gtx.Constraints.Max.Y
 
-		// Clamp submenu Y so it doesn't go off screen
-		maxY := gtx.Constraints.Max.Y
-		if submenuY+subHeight > maxY {
-			submenuY = maxY - subHeight
-		}
+			// Calculate how many items fit in one column
+			maxItemsPerCol := maxScreenY / itemHeight
+			if maxItemsPerCol < 1 {
+				maxItemsPerCol = 1
+			}
+			totalItems := len(parent.submenu)
+			numCols := (totalItems + maxItemsPerCol - 1) / maxItemsPerCol
+			if numCols < 1 {
+				numCols = 1
+			}
+			// Distribute items evenly across columns
+			itemsPerCol := (totalItems + numCols - 1) / numCols
 
-		w.drawMenuPanel(gtx, image.Point{X: subX, Y: submenuY}, subWidth, subHeight)
-		for i, subItem := range activeSubmenu {
-			subItemY := submenuY + i*itemHeight
-			w.drawMenuItem(gtx, subItem, subX, subItemY, subWidth, itemHeight)
+			// Draw one panel per column
+			for col := 0; col < numCols; col++ {
+				colStart := col * itemsPerCol
+				colEnd := colStart + itemsPerCol
+				if colEnd > totalItems {
+					colEnd = totalItems
+				}
+				colItems := colEnd - colStart
+				colX := subX + col*subWidth
+				colHeight := colItems * itemHeight
+
+				// First column clamps Y; additional columns align to top (Y=0)
+				colY := submenuY
+				if colY+colHeight > maxScreenY {
+					colY = maxScreenY - colHeight
+				}
+				if colY < 0 {
+					colY = 0
+				}
+
+				w.drawMenuPanel(gtx, image.Point{X: colX, Y: colY}, subWidth, colHeight)
+				for i := colStart; i < colEnd; i++ {
+					subItemY := colY + (i-colStart)*itemHeight
+					w.drawMenuItem(gtx, parent.submenu[i], colX, subItemY, subWidth, itemHeight, true)
+				}
+			}
 		}
 	}
 }
@@ -1112,8 +1184,9 @@ func (w *ControlWindow) drawMenuPanel(gtx layout.Context, pos image.Point, width
 	}
 }
 
-// drawMenuItem draws a single menu item with hover/click handling
-func (w *ControlWindow) drawMenuItem(gtx layout.Context, item *menuItem, x, y, width, height int) {
+// drawMenuItem draws a single menu item with hover/click handling.
+// isSubmenuItem indicates this is a child in a submenu (not the main menu).
+func (w *ControlWindow) drawMenuItem(gtx layout.Context, item *menuItem, x, y, width, height int, isSubmenuItem bool) {
 	itemRect := clip.Rect{
 		Min: image.Point{X: x + 1, Y: y + 1},
 		Max: image.Point{X: x + width - 1, Y: y + height},
