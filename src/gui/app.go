@@ -28,6 +28,13 @@ type DiscordStatus interface {
 	IsConnected() bool
 }
 
+// SessionLifecycleObserver receives session lifecycle events.
+type SessionLifecycleObserver interface {
+	SessionAdded(name string)
+	SessionRenamed(oldName, newName string)
+	SessionClosed(name string)
+}
+
 // App coordinates the entire application
 type App struct {
 	sessions   map[string]*SessionState
@@ -38,6 +45,9 @@ type App struct {
 	discordBot DiscordStatus
 	config     *config.Config
 	configPath string
+
+	observersMu sync.RWMutex
+	observers   []SessionLifecycleObserver
 }
 
 // SelectionPoint represents a position in the terminal
@@ -298,6 +308,7 @@ func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 			a.mu.Lock()
 			delete(a.sessions, name)
 			a.mu.Unlock()
+			a.notifySessionClosed(name)
 			if a.controlWin != nil {
 				a.controlWin.Invalidate()
 			}
@@ -542,6 +553,7 @@ func (a *App) NewSession(name, sshHost, workDir string) (*SessionState, error) {
 	a.mu.Lock()
 	a.sessions[name] = state
 	a.mu.Unlock()
+	a.notifySessionAdded(name)
 
 	return state, nil
 }
@@ -684,6 +696,8 @@ func (a *App) CloseSession(name string) error {
 		a.saveConfig()
 	}
 
+	a.notifySessionClosed(actualName)
+
 	return nil
 }
 
@@ -750,6 +764,8 @@ func (a *App) RenameSession(oldName, newName string) error {
 	if win != nil {
 		win.SetTitle(newName)
 	}
+
+	a.notifySessionRenamed(actualName, newName)
 
 	return nil
 }
@@ -821,6 +837,43 @@ func (a *App) CreateControlWindow() *ControlWindow {
 func (a *App) Run() error {
 	app.Main()
 	return nil
+}
+
+// AddSessionObserver registers a lifecycle observer.
+func (a *App) AddSessionObserver(observer SessionLifecycleObserver) {
+	if observer == nil {
+		return
+	}
+	a.observersMu.Lock()
+	a.observers = append(a.observers, observer)
+	a.observersMu.Unlock()
+}
+
+func (a *App) snapshotObservers() []SessionLifecycleObserver {
+	a.observersMu.RLock()
+	defer a.observersMu.RUnlock()
+
+	observers := make([]SessionLifecycleObserver, len(a.observers))
+	copy(observers, a.observers)
+	return observers
+}
+
+func (a *App) notifySessionAdded(name string) {
+	for _, observer := range a.snapshotObservers() {
+		observer.SessionAdded(name)
+	}
+}
+
+func (a *App) notifySessionRenamed(oldName, newName string) {
+	for _, observer := range a.snapshotObservers() {
+		observer.SessionRenamed(oldName, newName)
+	}
+}
+
+func (a *App) notifySessionClosed(name string) {
+	for _, observer := range a.snapshotObservers() {
+		observer.SessionClosed(name)
+	}
 }
 
 // SetDiscordBot sets the Discord bot reference for status display

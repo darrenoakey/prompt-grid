@@ -291,38 +291,23 @@ func (h *CommandHandler) HandleConnect(options []*discordgo.ApplicationCommandIn
 		return
 	}
 
-	state := h.bot.App().GetSession(name)
-	if state == nil {
+	if h.bot.App().GetSession(name) == nil {
 		h.respond(fmt.Sprintf("Session '%s' not found.", name), true)
 		return
 	}
 
-	// Stop existing streamer
-	if existing := h.bot.GetStreamer(); existing != nil {
-		existing.Stop()
+	channelID, err := h.bot.EnsureSessionStream(name)
+	if err != nil {
+		h.respond(fmt.Sprintf("Failed to connect session stream: %v", err), true)
+		return
 	}
 
-	// Create new streamer
-	streamer := NewStreamer(h.bot, state)
-	h.bot.SetStreamer(streamer)
-	streamer.Start()
-
-	h.respond(fmt.Sprintf("Now streaming **%s** to this channel.", name), false)
+	h.respond(fmt.Sprintf("Session **%s** is streaming in <#%s>.", name, channelID), false)
 }
 
 // HandleDisconnect handles the /term disconnect command
 func (h *CommandHandler) HandleDisconnect() {
-	streamer := h.bot.GetStreamer()
-	if streamer == nil {
-		h.respond("Not currently streaming any session.", true)
-		return
-	}
-
-	name := streamer.SessionName()
-	streamer.Stop()
-	h.bot.SetStreamer(nil)
-
-	h.respond(fmt.Sprintf("Stopped streaming **%s**.", name), false)
+	h.respond("Streaming is automatic per session. Close a session to stop its stream.", true)
 }
 
 // HandleFocus handles the /term focus command

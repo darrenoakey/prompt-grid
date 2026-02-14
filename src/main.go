@@ -198,6 +198,7 @@ func runDaemon() {
 	// is not nil (Go interface semantics), causing a panic in IsConnected()
 	if bot != nil {
 		application.SetDiscordBot(bot)
+		application.AddSessionObserver(bot)
 	}
 
 	// Start memory watchdog (monitors heap, crashes at 2GB with dump)

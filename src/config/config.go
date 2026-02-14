@@ -8,24 +8,27 @@ import (
 
 // SessionInfo describes a session for persistence across restarts
 type SessionInfo struct {
-	Type    string `json:"type"`               // "shell", "ssh", "claude"
+	Type    string `json:"type"` // "shell", "ssh", "claude"
 	WorkDir string `json:"work_dir,omitempty"`
 	SSHHost string `json:"ssh_host,omitempty"`
 }
 
 // Config holds application configuration
 type Config struct {
-	Discord       DiscordConfig        `json:"discord"`
-	SessionColors map[string]int       `json:"session_colors,omitempty"`
-	WindowSizes   map[string][2]int    `json:"window_sizes,omitempty"`
+	Discord       DiscordConfig          `json:"discord"`
+	SessionColors map[string]int         `json:"session_colors,omitempty"`
+	WindowSizes   map[string][2]int      `json:"window_sizes,omitempty"`
 	Sessions      map[string]SessionInfo `json:"sessions,omitempty"`
 }
 
 // DiscordConfig holds Discord-specific configuration
 type DiscordConfig struct {
-	ChannelID       string   `json:"channel_id"`
-	ServerID        string   `json:"server_id"`
-	AuthorizedUsers []string `json:"authorized_users"`
+	ChannelID         string   `json:"channel_id,omitempty"` // Legacy single-channel mode
+	ServerID          string   `json:"server_id"`
+	CategoryID        string   `json:"category_id,omitempty"`
+	CategoryName      string   `json:"category_name,omitempty"`
+	AuthorizedUserIDs []string `json:"authorized_user_ids,omitempty"`
+	AuthorizedUsers   []string `json:"authorized_users,omitempty"` // Legacy username auth
 }
 
 // configSearchPaths returns paths to search for config, in order of priority
