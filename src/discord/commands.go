@@ -184,8 +184,8 @@ func (h *CommandHandler) HandleRun(options []*discordgo.ApplicationCommandIntera
 		return
 	}
 
-	// Send command to session (add newline for enter)
-	_, err := state.PTY().Write([]byte(cmd + "\n"))
+	// Send command using tmux key simulation so Enter behaves like a real keypress.
+	err := h.bot.SendSessionInput(name, cmd)
 	if err != nil {
 		h.respond(fmt.Sprintf("Failed to send command: %v", err), true)
 		return

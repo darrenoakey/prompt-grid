@@ -195,6 +195,16 @@ Rename sessions:
 - Token stored in macOS keyring (`claude-term/discord_bot_token`)
 - Logs to `~/.config/claude-term/discord.log`
 
+#### Session Lifecycle Integration
+- Auto-creates Discord channels for each terminal session in a dedicated category
+- Session lifecycle handlers: `SessionAdded`, `SessionRenamed`, `SessionClosed`
+- Maintains session-to-channel mapping (`sessionChannels`, `channelSessions`)
+- Channel names sanitized from session names (alphanumeric + hyphens, fallback to "session")
+- Orphan channel cleanup: removes Discord channels when sessions are deleted
+- Orphan session cleanup: stops streaming to channels that no longer exist
+- Each session gets dedicated Streamer that auto-streams terminal output to its Discord channel
+- Claude UI footer (prompt/status lines) stripped from streamed output via `stripClaudeFooter()`
+
 ### Memory Safeguards
 - **Scrollback cap**: 100K lines per session, oldest chunks trimmed (`src/emulator/scrollback.go`)
 - **Parser caps**: intermediate string (64B), OSC string (64KB) — resets to ground on overflow

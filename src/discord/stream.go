@@ -25,6 +25,7 @@ type Streamer struct {
 	channelID string
 	running   bool
 	stopCh    chan struct{}
+	primed    bool
 
 	lastObserved    []string
 	lastSent        []string
@@ -54,9 +55,11 @@ func (s *Streamer) Start() {
 	}
 	now := time.Now()
 	s.running = true
+	s.primed = false
 	s.lastChange = now
-	s.lastActivity = now
-	s.lastContentSent = now
+	s.lastActivity = time.Time{}
+	s.lastContentSent = time.Time{}
+	s.lastHeartbeat = time.Time{}
 	s.mu.Unlock()
 
 	go s.loop()
@@ -109,6 +112,26 @@ func (s *Streamer) pollOnce() {
 	}
 
 	changed := !equalLines(snapshot, s.lastObserved)
+	if changed {
+		s.lastObserved = cloneLines(snapshot)
+		s.lastChange = now
+	}
+
+	if !s.primed {
+		// Startup warmup: wait until the attached tmux screen has stopped
+		// redrawing for idleTimeout, then baseline without sending.
+		if now.Sub(s.lastChange) >= idleTimeout {
+			s.lastSent = cloneLines(s.lastObserved)
+			s.dirty = false
+			s.primed = true
+			s.lastActivity = time.Time{}
+			s.lastContentSent = time.Time{}
+			s.lastHeartbeat = time.Time{}
+		}
+		s.mu.Unlock()
+		return
+	}
+
 	if changed {
 		s.lastObserved = cloneLines(snapshot)
 		s.dirty = true
@@ -168,7 +191,15 @@ func (s *Streamer) sendHeartbeatIfNeeded() {
 		s.mu.Unlock()
 		return
 	}
+	if !s.primed {
+		s.mu.Unlock()
+		return
+	}
 	now := time.Now()
+	if s.lastActivity.IsZero() {
+		s.mu.Unlock()
+		return
+	}
 	active := s.dirty || now.Sub(s.lastActivity) < heartbeatInterval
 	if !active || now.Sub(s.lastContentSent) < heartbeatInterval || now.Sub(s.lastHeartbeat) < heartbeatInterval {
 		s.mu.Unlock()

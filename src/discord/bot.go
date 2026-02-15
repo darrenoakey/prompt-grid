@@ -16,6 +16,7 @@ import (
 
 	"claude-term/src/config"
 	"claude-term/src/gui"
+	"claude-term/src/tmux"
 )
 
 const (
@@ -219,10 +220,26 @@ func (b *Bot) handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		return
 	}
 
-	if _, err := state.PTY().Write([]byte(m.Content + "\n")); err != nil {
+	if err := b.SendSessionInput(sessionName, m.Content); err != nil {
 		discordLog.Printf("Failed writing Discord message to PTY (%s): %v", sessionName, err)
 		_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Failed to send input: %v", err))
 	}
+}
+
+func discordContentToInputLines(content string) []string {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	if normalized == "" {
+		return nil
+	}
+
+	lines := strings.Split(normalized, "\n")
+	// Ignore trailing empty segment created by an ending newline so we don't
+	// synthesize an extra blank command.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 // reconnect attempts to reconnect with exponential backoff.
@@ -922,6 +939,48 @@ func (b *Bot) sendWorking(channelID string) error {
 	}
 	_, err := b.session.ChannelMessageSend(channelID, "working...")
 	return err
+}
+
+// SendSessionInput sends message content to a session as literal key presses
+// with an Enter key at the end of each line.
+func (b *Bot) SendSessionInput(sessionName, content string) error {
+	lines := discordContentToInputLines(content)
+	if len(lines) == 0 {
+		return nil
+	}
+
+	for _, line := range lines {
+		keyArgs := lineToKeyArgs(line)
+		if len(keyArgs) > 0 {
+			if err := tmux.SendKeys(sessionName, keyArgs...); err != nil {
+				return err
+			}
+		}
+		if err := tmux.SendKeys(sessionName, "Enter"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func lineToKeyArgs(line string) []string {
+	if line == "" {
+		return nil
+	}
+
+	keys := make([]string, 0, len([]rune(line)))
+	for _, r := range line {
+		switch r {
+		case ' ':
+			keys = append(keys, "Space")
+		case '\t':
+			keys = append(keys, "Tab")
+		default:
+			keys = append(keys, string(r))
+		}
+	}
+	return keys
 }
 
 func formatDiscordCodeBlocks(lines []string) []string {
