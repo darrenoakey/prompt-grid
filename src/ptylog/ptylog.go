@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	flushInterval = 2 * time.Second
+	flushInterval = 200 * time.Millisecond // Reduced from 2s to 200ms for better persistence
 	flushSize     = 64 * 1024       // 64KB
 	maxLogSize    = 10 * 1024 * 1024 // 10MB
 	truncTarget   = 5 * 1024 * 1024  // 5MB — keep last 5MB after truncation
@@ -166,6 +166,17 @@ func (w *Writer) truncateLocked() {
 
 	w.file, _ = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	w.size = int64(len(kept))
+}
+
+// Flush writes any buffered data to disk without closing the file.
+// Safe to call concurrently.
+func (w *Writer) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if !w.closed {
+		w.flushLocked()
+	}
 }
 
 // Close flushes remaining data and closes the file

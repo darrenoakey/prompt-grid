@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"syscall"
@@ -221,6 +222,16 @@ func runDaemon() {
 		}
 		// Control window closed - daemon continues for Discord bot
 		// User can reopen control via IPC or Discord commands
+	}()
+
+	// Set up graceful shutdown handler to flush logs on SIGTERM/SIGINT
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigChan
+		// Flush all PTY logs before exit
+		application.FlushAllLogs()
+		os.Exit(0)
 	}()
 
 	// Run Gio event loop - this keeps the daemon alive

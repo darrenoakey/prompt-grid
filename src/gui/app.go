@@ -942,3 +942,16 @@ func (a *App) AddClaudeSession(name, dir string) error {
 	}
 	return nil
 }
+
+// FlushAllLogs flushes all PTY log writers to disk.
+// Called during graceful shutdown to prevent data loss.
+func (a *App) FlushAllLogs() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for _, state := range a.sessions {
+		if state.ptyLog != nil {
+			state.ptyLog.Flush()
+		}
+	}
+}
