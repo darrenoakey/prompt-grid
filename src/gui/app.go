@@ -338,9 +338,23 @@ func (a *App) reconnectSession(name string) error {
 	// Look up or assign session color
 	sessionColor := a.resolveSessionColor(name)
 
+	// Load session info from config (for sshHost, type, workDir)
+	var sessionInfo config.SessionInfo
+	if a.config != nil {
+		if info, ok := a.config.GetSessionInfo(name); ok {
+			sessionInfo = info
+		} else {
+			// Backward compat: create default session info for pre-existing sessions
+			sessionInfo = config.SessionInfo{Type: "shell"}
+			a.config.SetSessionInfo(name, sessionInfo)
+			a.saveConfig()
+		}
+	}
+
 	state := &SessionState{
 		pty:        ptySess,
 		name:       name,
+		sshHost:    sessionInfo.SSHHost,
 		parser:     parser,
 		screen:     screen,
 		scrollback: scrollback,
@@ -350,14 +364,6 @@ func (a *App) reconnectSession(name string) error {
 
 	// Connect callbacks
 	a.setupSessionCallbacks(state, name)
-
-	// Ensure session metadata exists in config (backward compat for pre-existing sessions)
-	if a.config != nil {
-		if _, ok := a.config.GetSessionInfo(name); !ok {
-			a.config.SetSessionInfo(name, config.SessionInfo{Type: "shell"})
-			a.saveConfig()
-		}
-	}
 
 	// Start PTY with tmux attach
 	cmd, args := tmux.AttachArgs(name)
