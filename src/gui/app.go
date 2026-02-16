@@ -308,6 +308,29 @@ func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 			a.mu.Lock()
 			delete(a.sessions, name)
 			a.mu.Unlock()
+
+			// Clean up config and logs for command-type sessions (claude, codex, ssh)
+			// that exited intentionally. For regular shell sessions, preserve config
+			// so they can be recreated after app/machine restart.
+			shouldCleanup := false
+			if a.config != nil {
+				if info, ok := a.config.GetSessionInfo(name); ok {
+					// Clean up if it's a command session (claude, codex, ssh)
+					// but preserve shell sessions for restart persistence
+					shouldCleanup = info.Type != "shell"
+				}
+			}
+
+			if shouldCleanup {
+				ptylog.DeleteLog(name)
+				if a.config != nil {
+					a.config.DeleteSessionColor(name)
+					a.config.DeleteWindowSize(name)
+					a.config.DeleteSessionInfo(name)
+					a.saveConfig()
+				}
+			}
+
 			a.notifySessionClosed(name)
 			if a.controlWin != nil {
 				a.controlWin.Invalidate()
@@ -399,8 +422,8 @@ func (a *App) recreateSession(name string, info config.SessionInfo) error {
 		initialCmd = []string{claudePath}
 	} else if info.Type == "codex" {
 		// Codex sessions run codex as the command (exits when codex exits)
-		codexPath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "codex")
-		initialCmd = []string{codexPath}
+		// Use just "codex" to let PATH resolution find it
+		initialCmd = []string{"codex"}
 	}
 	if err := tmux.NewSession(name, workDir, cols, rows, initialCmd...); err != nil {
 		return err
@@ -1016,8 +1039,8 @@ func (a *App) AddClaudeSession(name, dir string) error {
 // When codex exits, the session closes automatically.
 func (a *App) AddCodexSession(name, dir string) error {
 	// Create session with codex as the command (like Claude sessions)
-	codexPath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "codex")
-	_, err := a.newSessionWithCommand(name, dir, codexPath)
+	// Use shell to find codex in PATH (it's at /opt/homebrew/bin/codex)
+	_, err := a.newSessionWithCommand(name, dir, "codex")
 	if err != nil {
 		return err
 	}
