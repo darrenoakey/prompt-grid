@@ -43,12 +43,16 @@ type ControlWindow struct {
 	tabStates      map[string]*tabState       // Persistent tab states keyed by name
 	termWidgets    map[string]*TerminalWidget // Persistent terminal widgets keyed by session name
 	contextMenu      *contextMenuState          // Right-click context menu
+	menuOverlay      *menuOverlay               // Fullscreen overlay to catch clicks outside menu
 	tabPanelBg       *tabPanelBackground        // For right-click on empty tab area
 	renameState      *renameState               // For renaming sessions
 	newSessionState  *newSessionState           // For creating new sessions with inline name input
 	focusTerminal    bool                       // One-shot: request focus for terminal widget next frame
 	lastTermSize     image.Point               // Last terminal area size (pixels) for resize detection
 }
+
+// menuOverlay is used to catch clicks outside the context menu
+type menuOverlay struct{}
 
 // tabPanelBackground is a persistent target for right-click on empty tab area
 type tabPanelBackground struct{}
@@ -97,6 +101,7 @@ func NewControlWindow(application *App) *ControlWindow {
 		tabStates:       make(map[string]*tabState),
 		termWidgets:     make(map[string]*TerminalWidget),
 		contextMenu:     &contextMenuState{},
+		menuOverlay:     &menuOverlay{},
 		tabPanelBg:      &tabPanelBackground{},
 		renameState:     &renameState{},
 		newSessionState: &newSessionState{},
@@ -224,13 +229,15 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		w.handleTerminalKeyboard(gtx)
 	}
 
-	// Handle clicks outside context menu to dismiss it
+	// Handle clicks to dismiss context menu (fullscreen overlay to catch all clicks)
 	if w.contextMenu.visible {
+		// Create a fullscreen overlay to intercept ALL clicks
 		areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
-		event.Op(gtx.Ops, w.contextMenu)
+		event.Op(gtx.Ops, w.menuOverlay)
+
 		for {
 			ev, ok := gtx.Event(
-				pointer.Filter{Target: w.contextMenu, Kinds: pointer.Press},
+				pointer.Filter{Target: w.menuOverlay, Kinds: pointer.Press},
 			)
 			if !ok {
 				break
