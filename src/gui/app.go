@@ -393,6 +393,10 @@ func (a *App) recreateSession(name string, info config.SessionInfo) error {
 	if info.SSHHost != "" {
 		initialCmd = []string{"ssh", info.SSHHost}
 		workDir = "" // SSH sessions don't use local workDir
+	} else if info.Type == "claude" {
+		// Claude sessions run claude as the command (exits when claude exits)
+		claudePath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "claude")
+		initialCmd = []string{claudePath}
 	}
 	if err := tmux.NewSession(name, workDir, cols, rows, initialCmd...); err != nil {
 		return err
@@ -441,12 +445,6 @@ func (a *App) recreateSession(name string, info config.SessionInfo) error {
 	a.mu.Lock()
 	a.sessions[name] = state
 	a.mu.Unlock()
-
-	// For claude sessions, send the claude command
-	if info.Type == "claude" {
-		claudePath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "claude")
-		tmux.SendKeys(name, claudePath, "Enter")
-	}
 
 	return nil
 }
@@ -553,6 +551,68 @@ func (a *App) NewSession(name, sshHost, workDir string) (*SessionState, error) {
 			logWriter.Close()
 		}
 		tmux.KillSession(name) // cleanup on failure
+		return nil, err
+	}
+
+	a.mu.Lock()
+	a.sessions[name] = state
+	a.mu.Unlock()
+	a.notifySessionAdded(name)
+
+	return state, nil
+}
+
+// newSessionWithCommand creates a session that runs a specific command (like claude).
+// When the command exits, tmux closes the session automatically.
+func (a *App) newSessionWithCommand(name, workDir, command string) (*SessionState, error) {
+	a.mu.Lock()
+	if _, exists := a.sessions[name]; exists {
+		a.mu.Unlock()
+		return nil, fmt.Errorf("session %q already exists", name)
+	}
+	a.mu.Unlock()
+
+	// Create tmux session with command as initial command
+	cols := uint16(120)
+	rows := uint16(24)
+	if err := tmux.NewSession(name, workDir, cols, rows, command); err != nil {
+		return nil, err
+	}
+
+	// Create PTY and attach
+	ptySess := pty.NewSession(name)
+
+	// Create emulator components
+	screen := emulator.NewScreen(int(cols), int(rows))
+	scrollback := emulator.NewScrollback()
+	parser := emulator.NewParser(screen, scrollback)
+
+	// Start PTY log writer
+	logWriter, _ := ptylog.NewWriter(name)
+
+	// Look up or assign session color
+	sessionColor := a.resolveSessionColor(name)
+
+	state := &SessionState{
+		pty:        ptySess,
+		name:       name,
+		parser:     parser,
+		screen:     screen,
+		scrollback: scrollback,
+		colors:     sessionColor,
+		ptyLog:     logWriter,
+	}
+
+	// Connect callbacks
+	a.setupSessionCallbacks(state, name)
+
+	// Start PTY with tmux attach
+	cmd, args := tmux.AttachArgs(name)
+	if err := ptySess.StartCommand(cmd, args); err != nil {
+		if logWriter != nil {
+			logWriter.Close()
+		}
+		tmux.KillSession(name)
 		return nil, err
 	}
 
@@ -924,13 +984,16 @@ func (a *App) AddSession(name string, sshHost string) error {
 }
 
 // AddClaudeSession creates a new session running Claude in the given directory.
+// When claude exits, the session closes automatically.
 func (a *App) AddClaudeSession(name, dir string) error {
-	_, err := a.NewSession(name, "", dir)
+	// Create session with claude as the command (like SSH sessions)
+	claudePath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "claude")
+	_, err := a.newSessionWithCommand(name, dir, claudePath)
 	if err != nil {
 		return err
 	}
 
-	// Update session type to "claude" (NewSession saved it as "shell")
+	// Save session type as "claude"
 	if a.config != nil {
 		a.config.SetSessionInfo(name, config.SessionInfo{
 			Type:    "claude",
@@ -938,10 +1001,6 @@ func (a *App) AddClaudeSession(name, dir string) error {
 		})
 		a.saveConfig()
 	}
-
-	// Send claude command to the session's shell (full path for reliability)
-	claudePath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "claude")
-	tmux.SendKeys(name, claudePath, "Enter")
 
 	if a.controlWin != nil {
 		a.controlWin.Invalidate()
