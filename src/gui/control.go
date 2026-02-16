@@ -722,6 +722,43 @@ func (w *ControlWindow) showContextMenu(sessionName string, pos image.Point) {
 		items = append(items, claudeItem)
 	}
 
+	// "New Codex Session" with submenu of ~/src directories
+	if dirs := listSrcDirs(); len(dirs) > 0 {
+		codexItem := &menuItem{label: "New Codex \u25b8"}
+		for _, dirName := range dirs {
+			dn := dirName // capture for closure
+			home, _ := os.UserHomeDir()
+			fullPath := filepath.Join(home, "src", dn)
+			codexItem.submenu = append(codexItem.submenu, &menuItem{
+				label: dn,
+				action: func() {
+					w.contextMenu.visible = false
+					w.window.Invalidate()
+					// Pick a unique session name
+					name := dn
+					if w.app.GetSession(name) != nil {
+						for i := 2; ; i++ {
+							candidate := fmt.Sprintf("%s-%d", dn, i)
+							if w.app.GetSession(candidate) == nil {
+								name = candidate
+								break
+							}
+						}
+					}
+					go func() {
+						err := w.app.AddCodexSession(name, fullPath)
+						if err == nil {
+							w.setSelected(name)
+							w.focusTerminal = true
+							w.window.Invalidate()
+						}
+					}()
+				},
+			})
+		}
+		items = append(items, codexItem)
+	}
+
 	// Session-specific menu items only when clicking on a tab
 	if sessionName != "" {
 		items = append(items, &menuItem{

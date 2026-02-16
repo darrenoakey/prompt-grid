@@ -397,6 +397,10 @@ func (a *App) recreateSession(name string, info config.SessionInfo) error {
 		// Claude sessions run claude as the command (exits when claude exits)
 		claudePath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "claude")
 		initialCmd = []string{claudePath}
+	} else if info.Type == "codex" {
+		// Codex sessions run codex as the command (exits when codex exits)
+		codexPath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "codex")
+		initialCmd = []string{codexPath}
 	}
 	if err := tmux.NewSession(name, workDir, cols, rows, initialCmd...); err != nil {
 		return err
@@ -997,6 +1001,31 @@ func (a *App) AddClaudeSession(name, dir string) error {
 	if a.config != nil {
 		a.config.SetSessionInfo(name, config.SessionInfo{
 			Type:    "claude",
+			WorkDir: dir,
+		})
+		a.saveConfig()
+	}
+
+	if a.controlWin != nil {
+		a.controlWin.Invalidate()
+	}
+	return nil
+}
+
+// AddCodexSession creates a new session running Codex in the given directory.
+// When codex exits, the session closes automatically.
+func (a *App) AddCodexSession(name, dir string) error {
+	// Create session with codex as the command (like Claude sessions)
+	codexPath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "codex")
+	_, err := a.newSessionWithCommand(name, dir, codexPath)
+	if err != nil {
+		return err
+	}
+
+	// Save session type as "codex"
+	if a.config != nil {
+		a.config.SetSessionInfo(name, config.SessionInfo{
+			Type:    "codex",
 			WorkDir: dir,
 		})
 		a.saveConfig()
