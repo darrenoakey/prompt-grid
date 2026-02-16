@@ -19,6 +19,7 @@ type Config struct {
 	SessionColors map[string]int         `json:"session_colors,omitempty"`
 	WindowSizes   map[string][2]int      `json:"window_sizes,omitempty"`
 	Sessions      map[string]SessionInfo `json:"sessions,omitempty"`
+	LastSelected  string                 `json:"last_selected,omitempty"`
 }
 
 // DiscordConfig holds Discord-specific configuration
@@ -199,6 +200,16 @@ func (c *Config) AllSessions() map[string]SessionInfo {
 		result[k] = v
 	}
 	return result
+}
+
+// GetLastSelected returns the last selected session name
+func (c *Config) GetLastSelected() string {
+	return c.LastSelected
+}
+
+// SetLastSelected saves the currently selected session name
+func (c *Config) SetLastSelected(name string) {
+	c.LastSelected = name
 }
 
 // LoadDefault loads configuration from the default path

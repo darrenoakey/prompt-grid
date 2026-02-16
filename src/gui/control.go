@@ -132,6 +132,15 @@ func (w *ControlWindow) Run() error {
 	}
 }
 
+// setSelected updates the selected session and persists it to config
+func (w *ControlWindow) setSelected(name string) {
+	w.selected = name
+	if w.app.config != nil {
+		w.app.config.SetLastSelected(name)
+		w.app.saveConfig()
+	}
+}
+
 func (w *ControlWindow) layout(gtx layout.Context) {
 	// Get current sessions
 	sessions := w.app.ListSessions()
@@ -169,13 +178,29 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		}
 	}
 
-	// Auto-select first session if nothing selected, or fix stale selection
-	// (e.g., after async rename completes and the old name is gone)
+	// Auto-select session: try last selected, then first available
 	if len(sessions) > 0 {
 		if w.selected == "" {
-			w.selected = sessions[0]
+			// Try to restore last selected session from config
+			if w.app.config != nil {
+				lastSelected := w.app.config.GetLastSelected()
+				found := false
+				for _, s := range sessions {
+					if s == lastSelected {
+						w.selected = lastSelected
+						found = true
+						break
+					}
+				}
+				if !found {
+					w.selected = sessions[0]
+				}
+			} else {
+				w.selected = sessions[0]
+			}
 			w.focusTerminal = true
 		} else {
+			// Fix stale selection (e.g., after async rename)
 			found := false
 			for _, s := range sessions {
 				if s == w.selected {
@@ -447,7 +472,7 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int
 						w.showContextMenu(tab.name, image.Point{X: int(e.Position.X), Y: offsetY + int(e.Position.Y)})
 					} else {
 						// Left-click - select tab and focus terminal
-						w.selected = tab.name
+						w.setSelected(tab.name)
 						w.focusTerminal = true
 						w.lastTermSize = image.Point{} // Force resize for new session
 						w.contextMenu.visible = false  // Close context menu on left click
@@ -686,7 +711,7 @@ func (w *ControlWindow) showContextMenu(sessionName string, pos image.Point) {
 					go func() {
 						err := w.app.AddClaudeSession(name, fullPath)
 						if err == nil {
-							w.selected = name
+							w.setSelected(name)
 							w.focusTerminal = true
 							w.window.Invalidate()
 						}
@@ -846,7 +871,7 @@ func (w *ControlWindow) confirmRename() {
 
 		// Update selection to track the renamed session
 		if w.selected == oldName {
-			w.selected = newName
+			w.setSelected(newName)
 		}
 
 		go func() {
@@ -960,7 +985,7 @@ func (w *ControlWindow) confirmNewSession() {
 		go func() {
 			err := w.app.AddSession(name, "")
 			if err == nil {
-				w.selected = name
+				w.setSelected(name)
 				w.focusTerminal = true
 				w.window.Invalidate()
 			}
