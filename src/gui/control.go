@@ -832,6 +832,12 @@ func (w *ControlWindow) confirmRename() {
 	if w.renameState.newName != "" && w.renameState.newName != w.renameState.sessionName {
 		oldName := w.renameState.sessionName
 		newName := w.renameState.newName
+
+		// Update selection to track the renamed session
+		if w.selected == oldName {
+			w.selected = newName
+		}
+
 		go func() {
 			w.app.RenameSession(oldName, newName)
 			w.window.Invalidate()
