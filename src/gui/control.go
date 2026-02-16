@@ -42,11 +42,12 @@ type ControlWindow struct {
 	selected       string
 	tabStates      map[string]*tabState       // Persistent tab states keyed by name
 	termWidgets    map[string]*TerminalWidget // Persistent terminal widgets keyed by session name
-	contextMenu    *contextMenuState          // Right-click context menu
-	tabPanelBg     *tabPanelBackground        // For right-click on empty tab area
-	renameState    *renameState               // For renaming sessions
-	focusTerminal  bool                       // One-shot: request focus for terminal widget next frame
-	lastTermSize   image.Point               // Last terminal area size (pixels) for resize detection
+	contextMenu      *contextMenuState          // Right-click context menu
+	tabPanelBg       *tabPanelBackground        // For right-click on empty tab area
+	renameState      *renameState               // For renaming sessions
+	newSessionState  *newSessionState           // For creating new sessions with inline name input
+	focusTerminal    bool                       // One-shot: request focus for terminal widget next frame
+	lastTermSize     image.Point               // Last terminal area size (pixels) for resize detection
 }
 
 // tabPanelBackground is a persistent target for right-click on empty tab area
@@ -58,6 +59,13 @@ type renameState struct {
 	sessionName string
 	newName     string
 	cursorPos   int
+}
+
+// newSessionState tracks new session creation with inline name input
+type newSessionState struct {
+	active    bool
+	name      string
+	cursorPos int
 }
 
 type tabState struct {
@@ -84,13 +92,14 @@ type menuItem struct {
 // NewControlWindow creates the control center window
 func NewControlWindow(application *App) *ControlWindow {
 	win := &ControlWindow{
-		app:         application,
-		window:      new(app.Window),
-		tabStates:   make(map[string]*tabState),
-		termWidgets: make(map[string]*TerminalWidget),
-		contextMenu: &contextMenuState{},
-		tabPanelBg:  &tabPanelBackground{},
-		renameState: &renameState{},
+		app:             application,
+		window:          new(app.Window),
+		tabStates:       make(map[string]*tabState),
+		termWidgets:     make(map[string]*TerminalWidget),
+		contextMenu:     &contextMenuState{},
+		tabPanelBg:      &tabPanelBackground{},
+		renameState:     &renameState{},
+		newSessionState: &newSessionState{},
 	}
 
 	win.window.Option(
@@ -181,9 +190,11 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		}
 	}
 
-	// Handle keyboard input: rename handler OR terminal forwarding
+	// Handle keyboard input: rename handler OR new session handler OR terminal forwarding
 	if w.renameState.active {
 		w.handleRenameInput(gtx)
+	} else if w.newSessionState.active {
+		w.handleNewSessionInput(gtx)
 	} else {
 		w.handleTerminalKeyboard(gtx)
 	}
@@ -316,6 +327,15 @@ func (w *ControlWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
 	// Layout tabs vertically
 	sessions := w.app.ListSessions()
 	offsetY := 0
+
+	// Show new session input tab at the top if active
+	if w.newSessionState.active {
+		stack := op.Offset(image.Pt(0, offsetY)).Push(gtx.Ops)
+		d := w.layoutNewSessionTab(gtx)
+		stack.Pop()
+		offsetY += d.Size.Y
+	}
+
 	for _, name := range sessions {
 		tab := w.tabStates[name]
 		if tab == nil {
@@ -635,17 +655,8 @@ func (w *ControlWindow) showContextMenu(sessionName string, pos image.Point) {
 		label: "New Session",
 		action: func() {
 			w.contextMenu.visible = false
+			w.startNewSession()
 			w.window.Invalidate()
-			// Create new session with auto-generated name
-			newName := w.nextSessionName()
-			go func() {
-				err := w.app.AddSession(newName, "")
-				if err == nil {
-					w.selected = newName
-					w.focusTerminal = true
-					w.window.Invalidate()
-				}
-			}()
 		},
 	})
 
@@ -919,6 +930,154 @@ func (w *ControlWindow) handleRenameInput(gtx layout.Context) {
 							text = string(rune(ch))
 						}
 						w.insertRenameChar(text)
+					}
+				}
+			}
+		}
+	}
+	areaStack.Pop()
+}
+
+// startNewSession begins the new session creation flow with inline name input
+func (w *ControlWindow) startNewSession() {
+	w.newSessionState.active = true
+	w.newSessionState.name = ""
+	w.newSessionState.cursorPos = 0
+}
+
+// cancelNewSession cancels the new session creation
+func (w *ControlWindow) cancelNewSession() {
+	w.newSessionState.active = false
+	w.newSessionState.name = ""
+	w.newSessionState.cursorPos = 0
+	w.focusTerminal = true
+}
+
+// confirmNewSession creates the session with the entered name
+func (w *ControlWindow) confirmNewSession() {
+	if w.newSessionState.name != "" {
+		name := w.newSessionState.name
+		go func() {
+			err := w.app.AddSession(name, "")
+			if err == nil {
+				w.selected = name
+				w.focusTerminal = true
+				w.window.Invalidate()
+			}
+		}()
+	}
+	w.cancelNewSession()
+}
+
+// layoutNewSessionTab renders the new session name input tab
+func (w *ControlWindow) layoutNewSessionTab(gtx layout.Context) layout.Dimensions {
+	height := 40
+
+	// Background (highlighted to show it's active)
+	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 80, G: 120, B: 200, A: 255}, rect)
+
+	// Draw text
+	label := material.Label(w.theme, unit.Sp(14), w.newSessionState.name)
+	label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+
+	stack := op.Offset(image.Pt(12, 10)).Push(gtx.Ops)
+	labelGtx := gtx
+	labelGtx.Constraints = layout.Constraints{
+		Min: image.Point{X: 0, Y: 0},
+		Max: image.Point{X: tabWidth - 24, Y: height - 10},
+	}
+	label.Layout(labelGtx)
+	stack.Pop()
+
+	// Draw cursor
+	charWidth := 8
+	cursorX := 12 + w.newSessionState.cursorPos*charWidth
+	cursorRect := clip.Rect{
+		Min: image.Point{X: cursorX, Y: 10},
+		Max: image.Point{X: cursorX + 1, Y: height - 12},
+	}.Op()
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, cursorRect)
+
+	return layout.Dimensions{Size: image.Point{X: tabWidth, Y: height}}
+}
+
+// handleNewSessionInput processes keyboard input during new session creation
+func (w *ControlWindow) handleNewSessionInput(gtx layout.Context) {
+	// Set up input area
+	areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
+	event.Op(gtx.Ops, w.newSessionState)
+
+	// Request keyboard focus
+	gtx.Execute(key.FocusCmd{Tag: w.newSessionState})
+
+	for {
+		ev, ok := gtx.Event(
+			key.Filter{Optional: key.ModShift | key.ModCtrl},
+		)
+		if !ok {
+			break
+		}
+		switch e := ev.(type) {
+		case key.EditEvent:
+			// Insert typed text at cursor position
+			if len(e.Text) > 0 {
+				before := w.newSessionState.name[:w.newSessionState.cursorPos]
+				after := w.newSessionState.name[w.newSessionState.cursorPos:]
+				w.newSessionState.name = before + e.Text + after
+				w.newSessionState.cursorPos += len(e.Text)
+			}
+		case key.Event:
+			if e.State == key.Press {
+				switch e.Name {
+				case key.NameReturn, key.NameEnter:
+					w.confirmNewSession()
+				case key.NameEscape:
+					w.cancelNewSession()
+				case key.NameDeleteBackward:
+					if w.newSessionState.cursorPos > 0 {
+						before := w.newSessionState.name[:w.newSessionState.cursorPos-1]
+						after := w.newSessionState.name[w.newSessionState.cursorPos:]
+						w.newSessionState.name = before + after
+						w.newSessionState.cursorPos--
+					}
+				case key.NameDeleteForward:
+					if w.newSessionState.cursorPos < len(w.newSessionState.name) {
+						before := w.newSessionState.name[:w.newSessionState.cursorPos]
+						after := w.newSessionState.name[w.newSessionState.cursorPos+1:]
+						w.newSessionState.name = before + after
+					}
+				case key.NameLeftArrow:
+					if w.newSessionState.cursorPos > 0 {
+						w.newSessionState.cursorPos--
+					}
+				case key.NameRightArrow:
+					if w.newSessionState.cursorPos < len(w.newSessionState.name) {
+						w.newSessionState.cursorPos++
+					}
+				case key.NameHome:
+					w.newSessionState.cursorPos = 0
+				case key.NameEnd:
+					w.newSessionState.cursorPos = len(w.newSessionState.name)
+				case key.NameSpace:
+					before := w.newSessionState.name[:w.newSessionState.cursorPos]
+					after := w.newSessionState.name[w.newSessionState.cursorPos:]
+					w.newSessionState.name = before + " " + after
+					w.newSessionState.cursorPos++
+				default:
+					// Handle regular character input
+					if len(e.Name) == 1 {
+						ch := e.Name[0]
+						var text string
+						if e.Modifiers.Contain(key.ModShift) {
+							text = string(rune(shiftChar(ch)))
+						} else {
+							text = string(rune(ch))
+						}
+						before := w.newSessionState.name[:w.newSessionState.cursorPos]
+						after := w.newSessionState.name[w.newSessionState.cursorPos:]
+						w.newSessionState.name = before + text + after
+						w.newSessionState.cursorPos += len(text)
 					}
 				}
 			}
