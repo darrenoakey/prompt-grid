@@ -49,6 +49,7 @@ type ControlWindow struct {
 	newSessionState  *newSessionState           // For creating new sessions with inline name input
 	focusTerminal    bool                       // One-shot: request focus for terminal widget next frame
 	lastTermSize     image.Point               // Last terminal area size (pixels) for resize detection
+	lastWindowSize   image.Point               // Last window size for tracking changes
 }
 
 // menuOverlay is used to catch clicks outside the context menu
@@ -107,9 +108,17 @@ func NewControlWindow(application *App) *ControlWindow {
 		newSessionState: &newSessionState{},
 	}
 
+	// Restore window size from config, or use default
+	width, height := 1000, 600
+	if application.config != nil {
+		if w, h, ok := application.config.GetControlCenterSize(); ok {
+			width, height = w, h
+		}
+	}
+
 	win.window.Option(
 		app.Title("Claude-Term Control Center"),
-		app.Size(unit.Dp(1000), unit.Dp(600)),
+		app.Size(unit.Dp(width), unit.Dp(height)),
 	)
 
 	win.shaper = text.NewShaper(text.WithCollection(render.CreateFontCollection()))
@@ -147,6 +156,16 @@ func (w *ControlWindow) setSelected(name string) {
 }
 
 func (w *ControlWindow) layout(gtx layout.Context) {
+	// Track window size changes and save to config
+	currentSize := image.Point{X: gtx.Constraints.Max.X, Y: gtx.Constraints.Max.Y}
+	if currentSize != w.lastWindowSize && currentSize.X > 0 && currentSize.Y > 0 {
+		w.lastWindowSize = currentSize
+		if w.app.config != nil {
+			w.app.config.SetControlCenterSize(currentSize.X, currentSize.Y)
+			w.app.saveConfig()
+		}
+	}
+
 	// Get current sessions
 	sessions := w.app.ListSessions()
 

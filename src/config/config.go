@@ -15,11 +15,13 @@ type SessionInfo struct {
 
 // Config holds application configuration
 type Config struct {
-	Discord       DiscordConfig          `json:"discord"`
-	SessionColors map[string]int         `json:"session_colors,omitempty"`
-	WindowSizes   map[string][2]int      `json:"window_sizes,omitempty"`
-	Sessions      map[string]SessionInfo `json:"sessions,omitempty"`
-	LastSelected  string                 `json:"last_selected,omitempty"`
+	Discord             DiscordConfig          `json:"discord"`
+	SessionColors       map[string]int         `json:"session_colors,omitempty"`
+	WindowSizes         map[string][2]int      `json:"window_sizes,omitempty"`
+	Sessions            map[string]SessionInfo `json:"sessions,omitempty"`
+	LastSelected        string                 `json:"last_selected,omitempty"`
+	ControlCenterSize   [2]int                 `json:"control_center_size,omitempty"`     // [width, height]
+	ControlCenterPos    [2]int                 `json:"control_center_position,omitempty"` // [x, y]
 }
 
 // DiscordConfig holds Discord-specific configuration
@@ -210,6 +212,32 @@ func (c *Config) GetLastSelected() string {
 // SetLastSelected saves the currently selected session name
 func (c *Config) SetLastSelected(name string) {
 	c.LastSelected = name
+}
+
+// GetControlCenterSize returns the saved control center window size
+func (c *Config) GetControlCenterSize() (int, int, bool) {
+	if c.ControlCenterSize[0] == 0 || c.ControlCenterSize[1] == 0 {
+		return 0, 0, false
+	}
+	return c.ControlCenterSize[0], c.ControlCenterSize[1], true
+}
+
+// SetControlCenterSize saves the control center window size
+func (c *Config) SetControlCenterSize(width, height int) {
+	c.ControlCenterSize = [2]int{width, height}
+}
+
+// GetControlCenterPos returns the saved control center window position
+func (c *Config) GetControlCenterPos() (int, int, bool) {
+	if c.ControlCenterPos[0] == 0 && c.ControlCenterPos[1] == 0 {
+		return 0, 0, false
+	}
+	return c.ControlCenterPos[0], c.ControlCenterPos[1], true
+}
+
+// SetControlCenterPos saves the control center window position
+func (c *Config) SetControlCenterPos(x, y int) {
+	c.ControlCenterPos = [2]int{x, y}
 }
 
 // LoadDefault loads configuration from the default path
