@@ -37,14 +37,15 @@ type SessionLifecycleObserver interface {
 
 // App coordinates the entire application
 type App struct {
-	sessions   map[string]*SessionState
-	mu         sync.RWMutex
-	colors     render.DefaultColors
-	fontSize   unit.Sp
-	controlWin *ControlWindow
-	discordBot DiscordStatus
-	config     *config.Config
-	configPath string
+	sessions        map[string]*SessionState
+	mu              sync.RWMutex
+	colors          render.DefaultColors
+	fontSize        unit.Sp
+	controlWin      *ControlWindow
+	discordBot      DiscordStatus
+	config          *config.Config
+	configPath      string
+	startupComplete bool // Set after discoverSessions(); session exits after this always clean up
 
 	observersMu sync.RWMutex
 	observers   []SessionLifecycleObserver
@@ -261,6 +262,9 @@ func NewApp(cfg *config.Config, cfgPath string) *App {
 	// Discover and reconnect to existing tmux sessions
 	a.discoverSessions()
 
+	// Mark startup complete: any session exit after this point is intentional
+	a.startupComplete = true
+
 	return a
 }
 
@@ -309,17 +313,11 @@ func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 			delete(a.sessions, name)
 			a.mu.Unlock()
 
-			// Clean up config and logs for command-type sessions (claude, codex, ssh)
-			// that exited intentionally. For regular shell sessions, preserve config
-			// so they can be recreated after app/machine restart.
-			shouldCleanup := false
-			if a.config != nil {
-				if info, ok := a.config.GetSessionInfo(name); ok {
-					// Clean up if it's a command session (claude, codex, ssh)
-					// but preserve shell sessions for restart persistence
-					shouldCleanup = info.Type != "shell"
-				}
-			}
+			// startupComplete means the app is fully running: any exit is intentional
+			// (user typed 'exit'). Clean up so the session doesn't resurrect on restart.
+			// If startupComplete is false we're still in discoverSessions(), which means
+			// a PTY died during startup reconnection — rare, skip cleanup so it can retry.
+			shouldCleanup := a.startupComplete
 
 			if shouldCleanup {
 				ptylog.DeleteLog(name)

@@ -1,9 +1,11 @@
 package gui
 
 import (
+	_ "embed"
 	"fmt"
 	"image"
 	"image/color"
+	_ "image/png"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	"strings"
 
 	"gioui.org/app"
+	"gioui.org/font"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
@@ -24,13 +27,18 @@ import (
 	"gioui.org/op/paint"
 	"gioui.org/text"
 	"gioui.org/unit"
+	"gioui.org/widget"
 	"gioui.org/widget/material"
 
 	"claude-term/src/pty"
 	"claude-term/src/render"
 )
 
-const tabWidth = 200
+const sidebarWidth = 240
+const headerHeight = 56
+
+//go:embed logo.png
+var logoBytes []byte
 
 // ControlWindow is the control center showing all sessions
 type ControlWindow struct {
@@ -50,7 +58,14 @@ type ControlWindow struct {
 	focusTerminal    bool                       // One-shot: request focus for terminal widget next frame
 	lastTermSize     image.Point               // Last terminal area size (pixels) for resize detection
 	lastWindowSize   image.Point               // Last window size for tracking changes
+	logoImage        image.Image               // Embedded logo
+	searchEditor     widget.Editor             // Search input
+	searchQuery      string                    // Current search query
+	newSessionBtn    *sessionButton            // "NEW SESSION" button target
 }
+
+// sessionButton is a persistent target for the NEW SESSION button
+type sessionButton struct{}
 
 // menuOverlay is used to catch clicks outside the context menu
 type menuOverlay struct{}
@@ -106,6 +121,14 @@ func NewControlWindow(application *App) *ControlWindow {
 		tabPanelBg:      &tabPanelBackground{},
 		renameState:     &renameState{},
 		newSessionState: &newSessionState{},
+		newSessionBtn:   &sessionButton{},
+	}
+
+	// Load embedded logo
+	var err error
+	win.logoImage, _, err = image.Decode(strings.NewReader(string(logoBytes)))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load logo: %v\n", err)
 	}
 
 	// Restore window size from config, or use default
@@ -117,13 +140,18 @@ func NewControlWindow(application *App) *ControlWindow {
 	}
 
 	win.window.Option(
-		app.Title("Claude-Term Control Center"),
+		app.Title("claude-term"),
 		app.Size(unit.Dp(width), unit.Dp(height)),
 	)
 
 	win.shaper = text.NewShaper(text.WithCollection(render.CreateFontCollection()))
 	win.theme = material.NewTheme()
 	win.theme.Shaper = win.shaper
+
+	// Initialize search editor
+	win.searchEditor.SingleLine = true
+	win.searchEditor.Submit = false
+
 	return win
 }
 
@@ -326,16 +354,32 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		areaStack.Pop()
 	}
 
-	// Split layout: tabs | separator | terminal
-	layout.Flex{}.Layout(gtx,
+	// New layout: [Header] over [Sidebar | Sep | (Terminal over StatusBar)]
+	layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return w.layoutTabs(gtx)
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			return w.layoutSeparator(gtx)
+			return w.layoutHeader(gtx)
 		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return w.layoutTerminal(gtx)
+			// Main area: sidebar | separator | terminal with status bar
+			return layout.Flex{}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return w.layoutSidebar(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return w.layoutSeparator(gtx)
+				}),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					// Terminal area with status bar at bottom
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							return w.layoutTerminal(gtx)
+						}),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return w.layoutStatusBar(gtx)
+						}),
+					)
+				}),
+			)
 		}),
 	)
 
@@ -343,19 +387,166 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 	w.layoutContextMenu(gtx)
 }
 
-func (w *ControlWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
-	// Fixed width for tabs panel
-	gtx.Constraints.Max.X = tabWidth
-	gtx.Constraints.Min.X = tabWidth
+func (w *ControlWindow) layoutHeader(gtx layout.Context) layout.Dimensions {
+	// Header bar background
+	headerBg := color.NRGBA{R: 20, G: 20, B: 20, A: 255}
+	rect := clip.Rect{Max: image.Point{X: gtx.Constraints.Max.X, Y: headerHeight}}.Op()
+	paint.FillShape(gtx.Ops, headerBg, rect)
+
+	// Logo: anchored left, centered vertically
+	if w.logoImage != nil {
+		logoMaxW := 160
+		logoMaxH := 40
+		// Calculate aspect-ratio-aware fit
+		imgBounds := w.logoImage.Bounds()
+		imgW := float32(imgBounds.Dx())
+		imgH := float32(imgBounds.Dy())
+		scaleW := float32(logoMaxW) / imgW
+		scaleH := float32(logoMaxH) / imgH
+		scale := scaleW
+		if scaleH < scaleW {
+			scale = scaleH
+		}
+		finalW := int(imgW * scale)
+		finalH := int(imgH * scale)
+
+		logoOp := paint.NewImageOp(w.logoImage)
+		logoX := 16
+		logoY := (headerHeight - finalH) / 2
+		logoStack := op.Offset(image.Pt(logoX, logoY)).Push(gtx.Ops)
+		logoGtx := gtx
+		logoGtx.Constraints.Max = image.Point{X: finalW, Y: finalH}
+		logoGtx.Constraints.Min = image.Point{X: finalW, Y: finalH}
+		widget.Image{Src: logoOp, Fit: widget.Contain}.Layout(logoGtx)
+		logoStack.Pop()
+	}
+
+	// Search bar: anchored center horizontally and vertically
+	searchWidth := 400
+	searchHeight := 32
+	searchX := (gtx.Constraints.Max.X - searchWidth) / 2
+	searchY := (headerHeight - searchHeight) / 2
+	searchStack := op.Offset(image.Pt(searchX, searchY)).Push(gtx.Ops)
+	searchGtx := gtx
+	searchGtx.Constraints.Max.X = searchWidth
+	searchGtx.Constraints.Min.X = searchWidth
+	w.layoutSearchBar(searchGtx)
+	searchStack.Pop()
+
+	// Discord status: anchored right, centered vertically
+	statusGtx := gtx
+	statusGtx.Constraints.Max = image.Point{X: 200, Y: headerHeight}
+	statusText := "Discord: offline"
+	if w.app.IsDiscordConnected() {
+		statusText = "Discord: online"
+	}
+	// Approximate width: 8px dot + 8px gap + text width (roughly 7px per char for 12sp)
+	approxWidth := 8 + 8 + len(statusText)*7
+	statusX := gtx.Constraints.Max.X - approxWidth - 16
+	statusY := (headerHeight - 12) / 2 // 12sp text height approximation
+
+	statusStack := op.Offset(image.Pt(statusX, statusY)).Push(gtx.Ops)
+	w.layoutDiscordStatusHeader(statusGtx)
+	statusStack.Pop()
+
+	return layout.Dimensions{Size: image.Point{X: gtx.Constraints.Max.X, Y: headerHeight}}
+}
+
+func (w *ControlWindow) layoutSearchBar(gtx layout.Context) layout.Dimensions {
+	// Update search query from editor
+	for {
+		ev, ok := w.searchEditor.Update(gtx)
+		if !ok {
+			break
+		}
+		if _, ok := ev.(widget.ChangeEvent); ok {
+			w.searchQuery = strings.ToLower(w.searchEditor.Text())
+		}
+	}
+
+	searchHeight := 32
+	// Search bar styling
+	searchBg := color.NRGBA{R: 12, G: 12, B: 12, A: 255}
+	borderColor := color.NRGBA{R: 51, G: 51, B: 51, A: 255}
+
+	// Draw background
+	bgRect := clip.Rect{Max: image.Point{X: gtx.Constraints.Max.X, Y: searchHeight}}.Op()
+	paint.FillShape(gtx.Ops, searchBg, bgRect)
+
+	// Draw border
+	for _, edge := range []clip.Rect{
+		{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: gtx.Constraints.Max.X, Y: 1}},
+		{Min: image.Point{X: 0, Y: searchHeight - 1}, Max: image.Point{X: gtx.Constraints.Max.X, Y: searchHeight}},
+		{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 1, Y: searchHeight}},
+		{Min: image.Point{X: gtx.Constraints.Max.X - 1, Y: 0}, Max: image.Point{X: gtx.Constraints.Max.X, Y: searchHeight}},
+	} {
+		paint.FillShape(gtx.Ops, borderColor, edge.Op())
+	}
+
+	// Layout editor
+	editorStyle := material.Editor(w.theme, &w.searchEditor, "Search sessions...")
+	editorStyle.Color = color.NRGBA{R: 224, G: 224, B: 224, A: 255}
+	editorStyle.HintColor = color.NRGBA{R: 136, G: 136, B: 136, A: 255}
+	editorStyle.TextSize = unit.Sp(14)
+
+	stack := op.Offset(image.Pt(8, 6)).Push(gtx.Ops)
+	editorGtx := gtx
+	editorGtx.Constraints.Max.X = gtx.Constraints.Max.X - 16
+	editorGtx.Constraints.Max.Y = searchHeight - 12
+	editorStyle.Layout(editorGtx)
+	stack.Pop()
+
+	return layout.Dimensions{Size: image.Point{X: gtx.Constraints.Max.X, Y: searchHeight}}
+}
+
+func (w *ControlWindow) layoutDiscordStatusHeader(gtx layout.Context) layout.Dimensions {
+	// Discord status indicator in header (right side)
+	dotSize := 8
+	var statusColor color.NRGBA
+	var statusText string
+	if w.app.IsDiscordConnected() {
+		statusColor = color.NRGBA{R: 0, G: 255, B: 0, A: 255} // Green
+		statusText = "Discord: online"
+	} else {
+		statusColor = color.NRGBA{R: 136, G: 136, B: 136, A: 255} // Gray
+		statusText = "Discord: offline"
+	}
+
+	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle, Spacing: layout.SpaceEnd}.Layout(gtx,
+		// Dot (rendered as small square for simplicity)
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			dotRect := clip.Rect{
+				Min: image.Point{X: 0, Y: 0},
+				Max: image.Point{X: dotSize, Y: dotSize},
+			}.Op()
+			paint.FillShape(gtx.Ops, statusColor, dotRect)
+			return layout.Dimensions{Size: image.Point{X: dotSize, Y: dotSize}}
+		}),
+		// Text
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			label := material.Label(w.theme, unit.Sp(12), statusText)
+			label.Color = color.NRGBA{R: 136, G: 136, B: 136, A: 255}
+			stack := op.Offset(image.Pt(8, 0)).Push(gtx.Ops)
+			d := label.Layout(gtx)
+			stack.Pop()
+			return layout.Dimensions{Size: image.Point{X: d.Size.X + 8, Y: d.Size.Y}}
+		}),
+	)
+}
+
+func (w *ControlWindow) layoutSidebar(gtx layout.Context) layout.Dimensions {
+	// Fixed width for sidebar
+	gtx.Constraints.Max.X = sidebarWidth
+	gtx.Constraints.Min.X = sidebarWidth
 	panelHeight := gtx.Constraints.Max.Y
 
 	// Background
-	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: panelHeight}}.Op()
-	paint.FillShape(gtx.Ops, color.NRGBA{R: 40, G: 40, B: 40, A: 255}, rect)
+	sidebarBg := color.NRGBA{R: 26, G: 26, B: 26, A: 255}
+	rect := clip.Rect{Max: image.Point{X: sidebarWidth, Y: panelHeight}}.Op()
+	paint.FillShape(gtx.Ops, sidebarBg, rect)
 
-	// Handle right-click on the tab panel background (empty area)
-	// This must cover the entire panel but let tab events through
-	bgAreaStack := clip.Rect{Max: image.Point{X: tabWidth, Y: panelHeight}}.Push(gtx.Ops)
+	// Handle right-click on the sidebar background (empty area)
+	bgAreaStack := clip.Rect{Max: image.Point{X: sidebarWidth, Y: panelHeight}}.Push(gtx.Ops)
 	event.Op(gtx.Ops, w.tabPanelBg)
 	for {
 		ev, ok := gtx.Event(
@@ -375,104 +566,160 @@ func (w *ControlWindow) layoutTabs(gtx layout.Context) layout.Dimensions {
 	}
 	bgAreaStack.Pop()
 
-	// Layout tabs vertically
-	sessions := w.app.ListSessions()
-	offsetY := 0
-
-	// Show new session input tab at the top if active
-	if w.newSessionState.active {
-		stack := op.Offset(image.Pt(0, offsetY)).Push(gtx.Ops)
-		d := w.layoutNewSessionTab(gtx)
-		stack.Pop()
-		offsetY += d.Size.Y
-	}
-
-	for _, name := range sessions {
-		tab := w.tabStates[name]
-		if tab == nil {
-			continue
+	// Get sessions and apply search filter
+	allSessions := w.app.ListSessions()
+	var sessions []string
+	if w.searchQuery != "" {
+		for _, name := range allSessions {
+			if strings.Contains(strings.ToLower(name), w.searchQuery) {
+				sessions = append(sessions, name)
+			}
 		}
-		stack := op.Offset(image.Pt(0, offsetY)).Push(gtx.Ops)
-		d := w.layoutTab(gtx, tab, offsetY)
-		stack.Pop()
-		offsetY += d.Size.Y
+	} else {
+		sessions = allSessions
 	}
 
-	// Layout Discord status at bottom
-	statusHeight := 30
-	statusY := panelHeight - statusHeight
-	statusStack := op.Offset(image.Pt(0, statusY)).Push(gtx.Ops)
-	w.layoutDiscordStatus(gtx, statusHeight)
-	statusStack.Pop()
+	// Layout sidebar sections vertically
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		// Header section: "SESSIONS (N)"
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			headerText := fmt.Sprintf("SESSIONS (%d)", len(allSessions))
+			label := material.Label(w.theme, unit.Sp(10), headerText)
+			label.Color = color.NRGBA{R: 136, G: 136, B: 136, A: 255}
+			return layout.Inset{Top: unit.Dp(12), Bottom: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Center.Layout(gtx, label.Layout)
+			})
+		}),
+		// Session list (scrollable area)
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			offsetY := 0
 
-	return layout.Dimensions{Size: image.Point{X: tabWidth, Y: panelHeight}}
+			// Show new session input at the top if active
+			if w.newSessionState.active {
+				stack := op.Offset(image.Pt(0, offsetY)).Push(gtx.Ops)
+				d := w.layoutNewSessionTab(gtx)
+				stack.Pop()
+				offsetY += d.Size.Y
+			}
+
+			// Render session list items
+			if len(sessions) == 0 && w.searchQuery != "" {
+				// Show "No sessions found" message
+				label := material.Label(w.theme, unit.Sp(12), "No sessions found")
+				label.Color = color.NRGBA{R: 136, G: 136, B: 136, A: 255}
+				stack := op.Offset(image.Pt(0, offsetY+20)).Push(gtx.Ops)
+				layout.Center.Layout(gtx, label.Layout)
+				stack.Pop()
+			} else {
+				for _, name := range sessions {
+					tab := w.tabStates[name]
+					if tab == nil {
+						continue
+					}
+					stack := op.Offset(image.Pt(0, offsetY)).Push(gtx.Ops)
+					d := w.layoutSessionItem(gtx, tab, offsetY)
+					stack.Pop()
+					offsetY += d.Size.Y
+				}
+			}
+
+			return layout.Dimensions{Size: image.Point{X: sidebarWidth, Y: gtx.Constraints.Max.Y}}
+		}),
+		// Footer section: "NEW SESSION" button
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return w.layoutNewSessionButton(gtx)
+		}),
+	)
 }
 
-func (w *ControlWindow) layoutDiscordStatus(gtx layout.Context, height int) {
-	// Background slightly lighter than sidebar
-	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
-	paint.FillShape(gtx.Ops, color.NRGBA{R: 50, G: 50, B: 50, A: 255}, rect)
+func (w *ControlWindow) layoutNewSessionButton(gtx layout.Context) layout.Dimensions {
+	buttonHeight := 60
+	btnPadding := 12
+	innerBtnHeight := 36
 
-	// Separator line at top
-	sepRect := clip.Rect{Max: image.Point{X: tabWidth, Y: 1}}.Op()
-	paint.FillShape(gtx.Ops, color.NRGBA{R: 70, G: 70, B: 70, A: 255}, sepRect)
-
-	// Status indicator circle
-	circleX := 12
-	circleY := height / 2
-	circleRadius := 5
-
-	var statusColor color.NRGBA
-	var statusText string
-	if w.app.IsDiscordConnected() {
-		statusColor = color.NRGBA{R: 80, G: 200, B: 80, A: 255} // Green
-		statusText = "Discord connected"
-	} else {
-		statusColor = color.NRGBA{R: 200, G: 80, B: 80, A: 255} // Red
-		statusText = "Discord offline"
+	// Button area for event handling
+	btnRect := clip.Rect{
+		Min: image.Point{X: btnPadding, Y: btnPadding},
+		Max: image.Point{X: sidebarWidth - btnPadding, Y: btnPadding + innerBtnHeight},
 	}
+	btnStack := btnRect.Push(gtx.Ops)
+	event.Op(gtx.Ops, w.newSessionBtn)
 
-	// Draw circle (approximate with small rect for simplicity)
-	circleRect := clip.Rect{
-		Min: image.Point{X: circleX - circleRadius, Y: circleY - circleRadius},
-		Max: image.Point{X: circleX + circleRadius, Y: circleY + circleRadius},
+	// Handle button clicks
+	var hovered bool
+	for {
+		ev, ok := gtx.Event(
+			pointer.Filter{Target: w.newSessionBtn, Kinds: pointer.Press | pointer.Enter | pointer.Leave},
+		)
+		if !ok {
+			break
+		}
+		if e, ok := ev.(pointer.Event); ok {
+			switch e.Kind {
+			case pointer.Enter:
+				hovered = true
+			case pointer.Leave:
+				hovered = false
+			case pointer.Press:
+				w.startNewSession()
+			}
+		}
+	}
+	btnStack.Pop()
+
+	// Button background (cyan with opacity)
+	accentColor := color.NRGBA{R: 0, G: 255, B: 200, A: 25}
+	if hovered {
+		accentColor = color.NRGBA{R: 0, G: 255, B: 200, A: 51}
+	}
+	bgRect := clip.Rect{
+		Min: image.Point{X: btnPadding, Y: btnPadding},
+		Max: image.Point{X: sidebarWidth - btnPadding, Y: btnPadding + innerBtnHeight},
 	}.Op()
-	paint.FillShape(gtx.Ops, statusColor, circleRect)
+	paint.FillShape(gtx.Ops, accentColor, bgRect)
 
-	// Status text
-	label := material.Label(w.theme, unit.Sp(11), statusText)
-	label.Color = color.NRGBA{R: 160, G: 160, B: 160, A: 255}
-
-	textStack := op.Offset(image.Pt(circleX+circleRadius+8, 8)).Push(gtx.Ops)
-	labelGtx := gtx
-	labelGtx.Constraints = layout.Constraints{
-		Min: image.Point{X: 0, Y: 0},
-		Max: image.Point{X: tabWidth - 30, Y: height},
+	// Button border
+	borderColor := color.NRGBA{R: 0, G: 255, B: 200, A: 76}
+	for _, edge := range []clip.Rect{
+		{Min: image.Point{X: btnPadding, Y: btnPadding}, Max: image.Point{X: sidebarWidth - btnPadding, Y: btnPadding + 1}},
+		{Min: image.Point{X: btnPadding, Y: btnPadding + innerBtnHeight - 1}, Max: image.Point{X: sidebarWidth - btnPadding, Y: btnPadding + innerBtnHeight}},
+		{Min: image.Point{X: btnPadding, Y: btnPadding}, Max: image.Point{X: btnPadding + 1, Y: btnPadding + innerBtnHeight}},
+		{Min: image.Point{X: sidebarWidth - btnPadding - 1, Y: btnPadding}, Max: image.Point{X: sidebarWidth - btnPadding, Y: btnPadding + innerBtnHeight}},
+	} {
+		paint.FillShape(gtx.Ops, borderColor, edge.Op())
 	}
-	label.Layout(labelGtx)
-	textStack.Pop()
+
+	// Button text - centered
+	label := material.Label(w.theme, unit.Sp(12), "NEW SESSION")
+	label.Color = color.NRGBA{R: 0, G: 255, B: 200, A: 255}
+	label.Font.Weight = font.Bold
+
+	// Center the text vertically and horizontally
+	textY := btnPadding + (innerBtnHeight-12)/2 - 2 // 12 is approx text height
+	labelStack := op.Offset(image.Pt(sidebarWidth/2-50, textY)).Push(gtx.Ops)
+	label.Layout(gtx)
+	labelStack.Pop()
+
+	return layout.Dimensions{Size: image.Point{X: sidebarWidth, Y: buttonHeight}}
 }
 
-func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int) layout.Dimensions {
-	height := 40
-
-	// Get session colors for this tab - use exact session colors
-	state := w.app.GetSession(tab.name)
-	var sessionBg, sessionFg color.NRGBA
-	if state != nil {
-		sessionBg = state.Colors().Background
-		sessionFg = state.Colors().Foreground
-	} else {
-		sessionBg = color.NRGBA{R: 60, G: 60, B: 60, A: 255}
-		sessionFg = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
-	}
-
-	// Check if this tab is being renamed
+func (w *ControlWindow) layoutSessionItem(gtx layout.Context, tab *tabState, offsetY int) layout.Dimensions {
+	itemHeight := 36
+	isSelected := tab.name == w.selected
 	isRenaming := w.renameState.active && w.renameState.sessionName == tab.name
+
+	// Get session color (for the dot)
+	state := w.app.GetSession(tab.name)
+	var sessionColor color.NRGBA
+	if state != nil {
+		sessionColor = state.Colors().Background
+	} else {
+		sessionColor = color.NRGBA{R: 60, G: 60, B: 60, A: 255}
+	}
 
 	// Handle input (only if not renaming)
 	if !isRenaming {
-		areaStack := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Push(gtx.Ops)
+		areaStack := clip.Rect{Max: image.Point{X: sidebarWidth, Y: itemHeight}}.Push(gtx.Ops)
 		event.Op(gtx.Ops, tab)
 
 		for {
@@ -509,72 +756,72 @@ func (w *ControlWindow) layoutTab(gtx layout.Context, tab *tabState, offsetY int
 		areaStack.Pop()
 	}
 
-	// Draw session background color for entire tab
-	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
-	paint.FillShape(gtx.Ops, sessionBg, rect)
-
-	// Hover feedback only (no color-altering overlay for selection)
-	if tab.hovered && tab.name != w.selected && !isRenaming {
-		highlightRect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
-		paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 20}, highlightRect)
+	// Background color based on state
+	activeHighlight := color.NRGBA{R: 45, G: 45, B: 45, A: 255}
+	if isSelected || tab.hovered {
+		rect := clip.Rect{Max: image.Point{X: sidebarWidth, Y: itemHeight}}.Op()
+		paint.FillShape(gtx.Ops, activeHighlight, rect)
 	}
 
-	// Selection indicator: arrow on the left
-	isSelected := tab.name == w.selected
-	textLeftPad := 12
+	// Left border (2px cyan for active session)
 	if isSelected {
-		textLeftPad = 24 // Make room for arrow
-		arrow := material.Label(w.theme, unit.Sp(12), "\u25B6") // ▶
-		arrow.Color = sessionFg
-		arrowStack := op.Offset(image.Pt(8, 12)).Push(gtx.Ops)
-		arrowGtx := gtx
-		arrowGtx.Constraints = layout.Constraints{
-			Min: image.Point{},
-			Max: image.Point{X: 16, Y: height},
-		}
-		arrow.Layout(arrowGtx)
-		arrowStack.Pop()
+		accentColor := color.NRGBA{R: 0, G: 255, B: 200, A: 255}
+		borderRect := clip.Rect{Max: image.Point{X: 2, Y: itemHeight}}.Op()
+		paint.FillShape(gtx.Ops, accentColor, borderRect)
 	}
 
-	// Draw tab name or rename input
+	// Draw rename input or normal item content
 	if isRenaming {
-		// Draw rename input field
-		w.layoutRenameInput(gtx, sessionFg, height)
+		w.layoutRenameInputInline(gtx, itemHeight)
 	} else {
-		// Draw normal tab name
-		label := material.Label(w.theme, unit.Sp(14), tab.name)
-		label.Color = sessionFg
+		// Colored dot (8px square, 12px from left edge) - vertically centered with text baseline
+		dotSize := 8
+		dotX := 12
+		textHeight := 14 // Sp(14) approximate height
+		textY := (itemHeight - textHeight) / 2
+		dotY := textY + (textHeight-dotSize)/2 + 1 // Center dot with text baseline
+		dotRect := clip.Rect{
+			Min: image.Point{X: dotX, Y: dotY},
+			Max: image.Point{X: dotX + dotSize, Y: dotY + dotSize},
+		}.Op()
+		paint.FillShape(gtx.Ops, sessionColor, dotRect)
 
-		// Position label with padding
-		stack := op.Offset(image.Pt(textLeftPad, 10)).Push(gtx.Ops)
+		// Session name text (14px, #e0e0e0)
+		textColor := color.NRGBA{R: 224, G: 224, B: 224, A: 255}
+		label := material.Label(w.theme, unit.Sp(14), tab.name)
+		label.Color = textColor
+
+		// Position text: 12px (left margin) + 8px (dot) + 8px (gap from dot)
+		textX := 12 + 8 + 8
+		stack := op.Offset(image.Pt(textX, textY)).Push(gtx.Ops)
 		labelGtx := gtx
 		labelGtx.Constraints = layout.Constraints{
 			Min: image.Point{X: 0, Y: 0},
-			Max: image.Point{X: tabWidth - textLeftPad - 12, Y: height - 10},
+			Max: image.Point{X: sidebarWidth - textX - 12, Y: itemHeight},
 		}
 		label.Layout(labelGtx)
 		stack.Pop()
 	}
 
-	return layout.Dimensions{Size: image.Point{X: tabWidth, Y: height}}
+	return layout.Dimensions{Size: image.Point{X: sidebarWidth, Y: itemHeight}}
 }
 
-// layoutRenameInput draws the rename text input
-func (w *ControlWindow) layoutRenameInput(gtx layout.Context, fg color.NRGBA, height int) {
+// layoutRenameInputInline draws the rename text input inline in a session item
+func (w *ControlWindow) layoutRenameInputInline(gtx layout.Context, height int) {
 	// Draw input background (slightly darker)
 	inputBg := clip.Rect{
-		Min: image.Point{X: 8, Y: 6},
-		Max: image.Point{X: tabWidth - 8, Y: height - 6},
+		Min: image.Point{X: 8, Y: 4},
+		Max: image.Point{X: sidebarWidth - 8, Y: height - 4},
 	}.Op()
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 20, G: 20, B: 20, A: 255}, inputBg)
 
-	// Draw input border
-	borderColor := color.NRGBA{R: 100, G: 150, B: 255, A: 255}
+	// Draw input border (cyan accent)
+	borderColor := color.NRGBA{R: 0, G: 255, B: 200, A: 255}
 	for _, edge := range []clip.Rect{
-		{Min: image.Point{X: 8, Y: 6}, Max: image.Point{X: tabWidth - 8, Y: 7}},                 // top
-		{Min: image.Point{X: 8, Y: height - 7}, Max: image.Point{X: tabWidth - 8, Y: height - 6}}, // bottom
-		{Min: image.Point{X: 8, Y: 6}, Max: image.Point{X: 9, Y: height - 6}},                   // left
-		{Min: image.Point{X: tabWidth - 9, Y: 6}, Max: image.Point{X: tabWidth - 8, Y: height - 6}}, // right
+		{Min: image.Point{X: 8, Y: 4}, Max: image.Point{X: sidebarWidth - 8, Y: 5}},                 // top
+		{Min: image.Point{X: 8, Y: height - 5}, Max: image.Point{X: sidebarWidth - 8, Y: height - 4}}, // bottom
+		{Min: image.Point{X: 8, Y: 4}, Max: image.Point{X: 9, Y: height - 4}},                        // left
+		{Min: image.Point{X: sidebarWidth - 9, Y: 4}, Max: image.Point{X: sidebarWidth - 8, Y: height - 4}}, // right
 	} {
 		paint.FillShape(gtx.Ops, borderColor, edge.Op())
 	}
@@ -583,22 +830,21 @@ func (w *ControlWindow) layoutRenameInput(gtx layout.Context, fg color.NRGBA, he
 	label := material.Label(w.theme, unit.Sp(14), w.renameState.newName)
 	label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
-	stack := op.Offset(image.Pt(12, 10)).Push(gtx.Ops)
+	stack := op.Offset(image.Pt(12, (height-14)/2)).Push(gtx.Ops)
 	labelGtx := gtx
 	labelGtx.Constraints = layout.Constraints{
 		Min: image.Point{X: 0, Y: 0},
-		Max: image.Point{X: tabWidth - 24, Y: height - 10},
+		Max: image.Point{X: sidebarWidth - 24, Y: height},
 	}
 	label.Layout(labelGtx)
 	stack.Pop()
 
-	// Draw cursor (simple blinking not implemented, just static cursor)
-	// Approximate cursor position based on character count
+	// Draw cursor
 	charWidth := 8 // Approximate pixels per character at this font size
 	cursorX := 12 + w.renameState.cursorPos*charWidth
 	cursorRect := clip.Rect{
-		Min: image.Point{X: cursorX, Y: 10},
-		Max: image.Point{X: cursorX + 1, Y: height - 12},
+		Min: image.Point{X: cursorX, Y: (height - 18) / 2},
+		Max: image.Point{X: cursorX + 1, Y: (height + 18) / 2},
 	}.Op()
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, cursorRect)
 }
@@ -614,13 +860,8 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 	// Get selected session
 	state := w.app.GetSession(w.selected)
 
-	// Fill the entire area with session background or default
-	var bgColor color.NRGBA
-	if state != nil {
-		bgColor = state.Colors().Background
-	} else {
-		bgColor = color.NRGBA{R: 30, G: 30, B: 30, A: 255}
-	}
+	// Fill the entire area with dark background
+	bgColor := color.NRGBA{R: 12, G: 12, B: 12, A: 255}
 	rect := clip.Rect{Max: gtx.Constraints.Max}.Op()
 	paint.FillShape(gtx.Ops, bgColor, rect)
 
@@ -669,6 +910,39 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 	stack.Pop()
 
 	return layout.Dimensions{Size: gtx.Constraints.Max}
+}
+
+func (w *ControlWindow) layoutStatusBar(gtx layout.Context) layout.Dimensions {
+	statusBarHeight := 32
+	// Status bar background (bright cyan accent)
+	accentColor := color.NRGBA{R: 0, G: 255, B: 200, A: 255}
+	rect := clip.Rect{Max: image.Point{X: gtx.Constraints.Max.X, Y: statusBarHeight}}.Op()
+	paint.FillShape(gtx.Ops, accentColor, rect)
+
+	// Display selected session name or empty message
+	var statusText string
+	if w.selected != "" {
+		statusText = w.selected
+	} else {
+		statusText = "No session selected"
+	}
+
+	// Status text (centered both horizontally and vertically, bold, dark text on cyan background)
+	label := material.Label(w.theme, unit.Sp(14), statusText)
+	label.Color = color.NRGBA{R: 12, G: 12, B: 12, A: 255} // Dark text on bright background
+	label.Font.Weight = font.Bold
+
+	// Approximate text dimensions for centering (14sp ≈ 14px height, ~8px per char width)
+	approxTextHeight := 14
+	approxTextWidth := len(statusText) * 8
+	textX := (gtx.Constraints.Max.X - approxTextWidth) / 2
+	textY := (statusBarHeight - approxTextHeight) / 2
+
+	textStack := op.Offset(image.Pt(textX, textY)).Push(gtx.Ops)
+	label.Layout(gtx)
+	textStack.Pop()
+
+	return layout.Dimensions{Size: image.Point{X: gtx.Constraints.Max.X, Y: statusBarHeight}}
 }
 
 
@@ -1057,37 +1331,44 @@ func (w *ControlWindow) confirmNewSession() {
 	w.cancelNewSession()
 }
 
-// layoutNewSessionTab renders the new session name input tab
+// layoutNewSessionTab renders the new session name input item
 func (w *ControlWindow) layoutNewSessionTab(gtx layout.Context) layout.Dimensions {
-	height := 40
+	itemHeight := 36
 
-	// Background (highlighted to show it's active)
-	rect := clip.Rect{Max: image.Point{X: tabWidth, Y: height}}.Op()
-	paint.FillShape(gtx.Ops, color.NRGBA{R: 80, G: 120, B: 200, A: 255}, rect)
+	// Background (highlighted with cyan accent)
+	activeHighlight := color.NRGBA{R: 45, G: 45, B: 45, A: 255}
+	rect := clip.Rect{Max: image.Point{X: sidebarWidth, Y: itemHeight}}.Op()
+	paint.FillShape(gtx.Ops, activeHighlight, rect)
+
+	// Left border (cyan)
+	accentColor := color.NRGBA{R: 0, G: 255, B: 200, A: 255}
+	borderRect := clip.Rect{Max: image.Point{X: 2, Y: itemHeight}}.Op()
+	paint.FillShape(gtx.Ops, accentColor, borderRect)
 
 	// Draw text
 	label := material.Label(w.theme, unit.Sp(14), w.newSessionState.name)
 	label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 
-	stack := op.Offset(image.Pt(12, 10)).Push(gtx.Ops)
+	textX := 12 + 8 + 8 // Match session item text position
+	stack := op.Offset(image.Pt(textX, (itemHeight-14)/2)).Push(gtx.Ops)
 	labelGtx := gtx
 	labelGtx.Constraints = layout.Constraints{
 		Min: image.Point{X: 0, Y: 0},
-		Max: image.Point{X: tabWidth - 24, Y: height - 10},
+		Max: image.Point{X: sidebarWidth - textX - 12, Y: itemHeight},
 	}
 	label.Layout(labelGtx)
 	stack.Pop()
 
 	// Draw cursor
 	charWidth := 8
-	cursorX := 12 + w.newSessionState.cursorPos*charWidth
+	cursorX := textX + w.newSessionState.cursorPos*charWidth
 	cursorRect := clip.Rect{
-		Min: image.Point{X: cursorX, Y: 10},
-		Max: image.Point{X: cursorX + 1, Y: height - 12},
+		Min: image.Point{X: cursorX, Y: (itemHeight - 18) / 2},
+		Max: image.Point{X: cursorX + 1, Y: (itemHeight + 18) / 2},
 	}.Op()
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, cursorRect)
 
-	return layout.Dimensions{Size: image.Point{X: tabWidth, Y: height}}
+	return layout.Dimensions{Size: image.Point{X: sidebarWidth, Y: itemHeight}}
 }
 
 // handleNewSessionInput processes keyboard input during new session creation
@@ -1419,21 +1700,23 @@ func (w *ControlWindow) drawMenuPanel(gtx layout.Context, pos image.Point, width
 	}.Op()
 	paint.FillShape(gtx.Ops, color.NRGBA{R: 0, G: 0, B: 0, A: 80}, shadowRect)
 
-	// Background
+	// Background (sidebar color)
+	sidebarBg := color.NRGBA{R: 26, G: 26, B: 26, A: 255}
 	menuRect := clip.Rect{
 		Min: pos,
 		Max: image.Point{X: pos.X + width, Y: pos.Y + height},
 	}.Op()
-	paint.FillShape(gtx.Ops, color.NRGBA{R: 45, G: 45, B: 50, A: 255}, menuRect)
+	paint.FillShape(gtx.Ops, sidebarBg, menuRect)
 
 	// Border
+	borderColor := color.NRGBA{R: 51, G: 51, B: 51, A: 255}
 	for _, edge := range []clip.Rect{
 		{Min: pos, Max: image.Point{X: pos.X + width, Y: pos.Y + 1}},
 		{Min: image.Point{X: pos.X, Y: pos.Y + height - 1}, Max: image.Point{X: pos.X + width, Y: pos.Y + height}},
 		{Min: pos, Max: image.Point{X: pos.X + 1, Y: pos.Y + height}},
 		{Min: image.Point{X: pos.X + width - 1, Y: pos.Y}, Max: image.Point{X: pos.X + width, Y: pos.Y + height}},
 	} {
-		paint.FillShape(gtx.Ops, color.NRGBA{R: 80, G: 80, B: 90, A: 255}, edge.Op())
+		paint.FillShape(gtx.Ops, borderColor, edge.Op())
 	}
 }
 
@@ -1471,19 +1754,21 @@ func (w *ControlWindow) drawMenuItem(gtx layout.Context, item *menuItem, x, y, w
 
 	// Hover highlight
 	if item.hovered {
+		activeHighlight := color.NRGBA{R: 45, G: 45, B: 45, A: 255}
 		hoverRect := clip.Rect{
 			Min: image.Point{X: x + 2, Y: y + 1},
 			Max: image.Point{X: x + width - 2, Y: y + height - 1},
 		}.Op()
-		paint.FillShape(gtx.Ops, color.NRGBA{R: 80, G: 120, B: 200, A: 255}, hoverRect)
+		paint.FillShape(gtx.Ops, activeHighlight, hoverRect)
 	}
 
 	// Label
+	textColor := color.NRGBA{R: 224, G: 224, B: 224, A: 255}
 	label := material.Label(w.theme, unit.Sp(13), item.label)
 	if item.hovered {
 		label.Color = color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 	} else {
-		label.Color = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
+		label.Color = textColor
 	}
 	labelStack := op.Offset(image.Pt(x+12, y+6)).Push(gtx.Ops)
 	labelGtx := gtx

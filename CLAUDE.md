@@ -187,6 +187,10 @@ Rename sessions:
 - **CRITICAL (scroll events)**: `pointer.Filter` requires `ScrollY` (and/or `ScrollX`) bounds for scroll events to be delivered. Default `{Min: 0, Max: 0}` silently rejects all scroll events. Set bounds based on scrollable content size.
 - **CRITICAL (Tab key)**: Gio intercepts Tab as a `SystemEvent` for focus navigation. Catch-all `key.Filter` (empty `Name`) skips SystemEvents. To receive Tab in a terminal widget, add an explicit `key.Filter{Name: key.NameTab}` alongside the catch-all filter. Without this, Tab is consumed by Gio and never reaches the widget's event handler.
 - **CRITICAL (macOS deadlock)**: NEVER call blocking operations (subprocess, cross-window `window.Option()`) synchronously from within a Gio frame handler. On macOS, the Cocoa main thread blocks while the frame handler runs. If the frame handler calls `window.Option()` on a different window, it dispatches to the Cocoa main thread → deadlock. All context menu actions (New Session, Close, Rename, Bring to Front) run in goroutines for this reason.
+- **Gio image fit**: `widget.Image{Src: logoOp, Fit: widget.Contain}` scales with aspect ratio preserved. Set `gtx.Constraints.Max` to the bounding box before Layout. Font weight: `font.Bold` from `gioui.org/font` package, NOT `text.Bold`.
+- **Embedded PNG decode**: Need `_ "image/png"` import AND `image.Decode(strings.NewReader(string(bytes)))` — do not use `png.Decode()` directly as `image.Image` interface type won't be inferred.
+- **Anchored header layout**: For logo-left / search-center / status-right, use `op.Offset()` with calculated pixel coordinates, NOT Flex+spacers. Flex spacers don't reliably center when siblings have unequal widths.
+- **Status bar placement**: Place per-panel status bars inside that panel's Flex column (terminal column), not the outer window Flex, to avoid spanning the sidebar.
 
 ### Discord Bot
 - Auto-reconnects with exponential backoff (1s to 10 min) on disconnect
@@ -227,6 +231,13 @@ Rename sessions:
 - Complete isolation from production instance
 - TestMain cleans up via `tmux.KillServer()` and removes realm directory
 - **CRITICAL**: TestMain sets `HOME` to temp dir and `SHELL=/bin/bash` to avoid user's slow shell init files (.zshrc/.bashrc) blocking tmux sessions. Without this, the shell inside tmux never becomes interactive during tests.
+- **Reboot simulation in tests**: Must call `state.pty.SetOnExit(nil)` before killing the session. In a real reboot the OS kills the process instantly — no callbacks fire and config stays on disk. If you kill tmux without nil-ing OnExit, the callback fires, cleans up config, and recreation never happens.
+
+### Session Exit vs Reboot Detection (`App.startupComplete`)
+- `App.startupComplete` is set to `true` after `discoverSessions()` returns in `NewApp()`
+- In `SetOnExit`: if `startupComplete == true`, always clean up config (user intentionally exited)
+- If `startupComplete == false` (still in startup reconnection), skip cleanup so it can retry
+- **Root cause of session resurrection bug**: `tmux.ListSessions()` fails when the last session exits (tmux server shuts down too) — this was being mis-identified as a reboot. The `startupComplete` flag eliminates the ambiguity entirely.
 
 ### TestDriver ("Interfaced User" Pattern)
 Located in `src/gui/testdriver.go`:

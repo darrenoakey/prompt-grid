@@ -354,8 +354,12 @@ func TestSessionRecreateAfterTmuxDeath(t *testing.T) {
 	}
 	os.WriteFile(ptylog.LogPath("test-recreate"), logData, 0644)
 
-	// Kill tmux session to simulate reboot
+	// Simulate a machine reboot: the OS kills the process instantly.
+	// In a real reboot no exit callbacks fire, so config is preserved on disk.
+	// We simulate this by clearing the OnExit callback before closing, so the
+	// config cleanup code never runs (just like the OS would not run it).
 	if state.pty != nil {
+		state.pty.SetOnExit(nil)
 		state.pty.Close()
 	}
 	tmux.KillSession("test-recreate")
