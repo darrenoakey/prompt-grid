@@ -57,6 +57,7 @@ type ControlWindow struct {
 	newSessionState  *newSessionState           // For creating new sessions with inline name input
 	focusTerminal    bool                       // One-shot: request focus for terminal widget next frame
 	lastTermSize     image.Point               // Last terminal area size (pixels) for resize detection
+	lastSelected     string                    // Last selected session name for resize-on-switch
 	lastWindowSize   image.Point               // Last window size for tracking changes
 	logoImage        image.Image               // Embedded logo
 	searchEditor     widget.Editor             // Search input
@@ -874,8 +875,9 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 	availW := gtx.Constraints.Max.X - padding*2
 	availH := gtx.Constraints.Max.Y - padding*2
 	termSize := image.Point{X: availW, Y: availH}
-	if termSize != w.lastTermSize {
+	if termSize != w.lastTermSize || w.selected != w.lastSelected {
 		w.lastTermSize = termSize
+		w.lastSelected = w.selected
 		cellW := int(float32(w.app.FontSize()) * 0.6)
 		cellH := int(float32(w.app.FontSize()) * 1.5)
 		if cellW > 0 && cellH > 0 {
@@ -1434,12 +1436,16 @@ func (w *ControlWindow) handleNewSessionInput(gtx layout.Context) {
 					w.newSessionState.name = before + " " + after
 					w.newSessionState.cursorPos++
 				default:
-					// Handle regular character input
+					// Handle regular character input.
+					// Note: e.Name is always uppercase in Gio (pressing 'a' gives "A").
+					// Lowercase unless shift is held.
 					if len(e.Name) == 1 {
 						ch := e.Name[0]
 						var text string
 						if e.Modifiers.Contain(key.ModShift) {
 							text = string(rune(shiftChar(ch)))
+						} else if ch >= 'A' && ch <= 'Z' {
+							text = string(rune(ch + 32)) // lowercase
 						} else {
 							text = string(rune(ch))
 						}
