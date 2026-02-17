@@ -4,12 +4,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-OUTPUT="$SCRIPT_DIR/output/claude-term"
+OUTPUT="$SCRIPT_DIR/output/prompt-grid"
 mkdir -p "$SCRIPT_DIR/output"
 
 case "${1:-help}" in
     build)
-        echo "Building claude-term..."
+        echo "Building prompt-grid..."
         go build -o "$OUTPUT" ./src
         echo "Build successful: $OUTPUT"
         ;;

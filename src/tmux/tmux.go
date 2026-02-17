@@ -16,17 +16,17 @@ const (
 // ServerName returns the tmux server name, realm-aware for test isolation
 func ServerName() string {
 	if realm := os.Getenv(RealmEnvVar); realm != "" {
-		return "claude-term-" + realm
+		return "prompt-grid-" + realm
 	}
-	return "claude-term"
+	return "prompt-grid"
 }
 
 // GetSocketDir returns the directory for IPC sockets (realm-aware)
 func GetSocketDir() string {
 	if realm := os.Getenv(RealmEnvVar); realm != "" {
-		return "/tmp/claude-term-" + realm
+		return "/tmp/prompt-grid-" + realm
 	}
-	return "/tmp/claude-term-sessions"
+	return "/tmp/prompt-grid-sessions"
 }
 
 // EnsureInstalled checks that tmux is available, installs via brew if missing

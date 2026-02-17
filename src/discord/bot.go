@@ -14,9 +14,9 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/zalando/go-keyring"
 
-	"claude-term/src/config"
-	"claude-term/src/gui"
-	"claude-term/src/tmux"
+	"prompt-grid/src/config"
+	"prompt-grid/src/gui"
+	"prompt-grid/src/tmux"
 )
 
 const (
@@ -32,7 +32,7 @@ var discordLog *log.Logger
 func init() {
 	// Set up logging to file
 	home, _ := os.UserHomeDir()
-	logPath := filepath.Join(home, ".config", "claude-term", "discord.log")
+	logPath := filepath.Join(home, ".config", "prompt-grid", "discord.log")
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		discordLog = log.New(os.Stderr, "[discord] ", log.LstdFlags)
@@ -42,7 +42,7 @@ func init() {
 }
 
 const (
-	serviceName = "claude-term"
+	serviceName = "prompt-grid"
 	tokenKey    = "discord_bot_token"
 )
 

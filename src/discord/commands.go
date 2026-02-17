@@ -8,8 +8,8 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
-	"claude-term/src/gui"
-	"claude-term/src/render"
+	"prompt-grid/src/gui"
+	"prompt-grid/src/render"
 )
 
 // CommandHandler handles Discord slash commands

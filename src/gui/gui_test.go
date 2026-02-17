@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"claude-term/src/config"
+	"prompt-grid/src/config"
 )
 
 // --- Session State Tests ---

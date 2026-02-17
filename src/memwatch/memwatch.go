@@ -40,7 +40,7 @@ func Start(introspect IntrospectFunc) *Watchdog {
 // StartWithThreshold launches the memory watchdog with a custom threshold.
 func StartWithThreshold(threshold uint64, introspect IntrospectFunc) *Watchdog {
 	homeDir, _ := os.UserHomeDir()
-	dumpDir := filepath.Join(homeDir, ".config", "claude-term")
+	dumpDir := filepath.Join(homeDir, ".config", "prompt-grid")
 
 	w := &Watchdog{
 		threshold:  threshold,

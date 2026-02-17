@@ -4,7 +4,7 @@ import (
 	"image"
 	"image/color"
 
-	"claude-term/src/emulator"
+	"prompt-grid/src/emulator"
 )
 
 // CellStyle represents text rendering style

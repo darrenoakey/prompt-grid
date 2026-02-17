@@ -13,8 +13,8 @@ import (
 	"gioui.org/text"
 	"gioui.org/unit"
 
-	"claude-term/src/pty"
-	"claude-term/src/render"
+	"prompt-grid/src/pty"
+	"prompt-grid/src/render"
 )
 
 // Window counter for positioning

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"claude-term/src/tmux"
+	"prompt-grid/src/tmux"
 )
 
 // SocketPath returns the path to the IPC socket.

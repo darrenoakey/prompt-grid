@@ -20,8 +20,8 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget/material"
 
-	"claude-term/src/emulator"
-	"claude-term/src/render"
+	"prompt-grid/src/emulator"
+	"prompt-grid/src/render"
 )
 
 // TerminalWidget is a Gio widget that displays a terminal session

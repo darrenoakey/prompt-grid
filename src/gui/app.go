@@ -12,12 +12,12 @@ import (
 	"gioui.org/app"
 	"gioui.org/unit"
 
-	"claude-term/src/config"
-	"claude-term/src/emulator"
-	"claude-term/src/pty"
-	"claude-term/src/ptylog"
-	"claude-term/src/render"
-	"claude-term/src/tmux"
+	"prompt-grid/src/config"
+	"prompt-grid/src/emulator"
+	"prompt-grid/src/pty"
+	"prompt-grid/src/ptylog"
+	"prompt-grid/src/render"
+	"prompt-grid/src/tmux"
 )
 
 // ErrSessionNotFound is returned when a session is not found

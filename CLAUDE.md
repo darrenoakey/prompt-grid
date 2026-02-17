@@ -5,15 +5,15 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 
 ## Build & Test
 ```bash
-./run build    # Build to output/claude-term
+./run build    # Build to output/prompt-grid
 ./run test     # Run all tests
-~/bin/claude-term "Session Name"  # Launch (runs in background via nohup)
+~/bin/prompt-grid "Session Name"  # Launch (runs in background via nohup)
 ```
 
 ## Key Architecture
 
 ### Package Structure
-- `src/tmux/` - tmux CLI wrapper (session lifecycle via `tmux -L claude-term`)
+- `src/tmux/` - tmux CLI wrapper (session lifecycle via `tmux -L prompt-grid`)
 - `src/pty/` - PTY session management (runs `tmux attach` inside a PTY)
 - `src/ptylog/` - PTY output logging and replay for session persistence
 - `src/emulator/` - ANSI parser, screen buffer, scrollback
@@ -26,7 +26,7 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 - `src/memwatch/` - Memory watchdog (2GB crash with diagnostic dump)
 
 ### tmux-Based Session Architecture (Survives Restart)
-Sessions are managed by tmux via a dedicated server (`tmux -L claude-term`):
+Sessions are managed by tmux via a dedicated server (`tmux -L prompt-grid`):
 - **Main process**: GUI, Discord bot, IPC server
 - **tmux server**: Owns all terminal sessions, survives GUI restarts
 
@@ -52,7 +52,7 @@ Key behaviors:
 
 ### Session Persistence Across Reboots
 Sessions survive reboots via PTY output logging and config metadata:
-- **PTY log**: Raw PTY output bytes continuously written to `~/.config/claude-term/sessions/<name>.ptylog`
+- **PTY log**: Raw PTY output bytes continuously written to `~/.config/prompt-grid/sessions/<name>.ptylog`
 - **Session metadata**: `config.SessionInfo` (type, workDir, sshHost) saved in `config.json` under `sessions` map
 - **On startup**: `discoverSessions()` reconnects live tmux sessions AND recreates dead ones from config
 - **Replay**: Log bytes fed through ANSI parser to restore scrollback before connecting live PTY
@@ -101,7 +101,7 @@ tmux wrapper (`src/tmux/tmux.go`):
 
 ### Session Colors
 - 128 pre-generated colors in HSV space (render/palette.go)
-- Colors persisted in `~/.config/claude-term/config.json` as `session_colors` map (name → palette index)
+- Colors persisted in `~/.config/prompt-grid/config.json` as `session_colors` map (name → palette index)
 - On session create/reconnect: lookup saved index, or assign random + save
 - On session close: delete color mapping from config
 - On session rename: move mapping old→new name
@@ -153,18 +153,18 @@ Rename sessions:
 - SSH sessions: tmux runs `ssh host` as the initial command
 
 ### Single Instance Architecture
-- Uses Unix socket at `/tmp/claude-term-sessions/ipc.sock` for IPC
+- Uses Unix socket at `/tmp/prompt-grid-sessions/ipc.sock` for IPC
 - First instance becomes primary, listens on socket
 - Subsequent invocations send session request to primary and exit
 - All sessions managed by single app with one control center
 - Daemonization: re-exec with `CLAUDE_TERM_DAEMON=1` env var, parent exits immediately
-- Single-instance guard: `syscall.Flock` on `/tmp/claude-term-sessions/daemon.lock`
+- Single-instance guard: `syscall.Flock` on `/tmp/prompt-grid-sessions/daemon.lock`
 - **CRITICAL**: `runtime.KeepAlive(lockFile)` required after flock -- Go GC will finalize unreferenced `*os.File`, silently releasing the lock
 
 ### Deployment
-- `./run build` outputs to `output/claude-term`
-- `auto` service runs `~/bin/claude-term --daemon` -- must copy binary there after build
-- Deploy: `cp output/claude-term ~/bin/claude-term && ~/bin/auto restart claude-term`
+- `./run build` outputs to `output/prompt-grid`
+- `auto` service runs `~/bin/prompt-grid --daemon` -- must copy binary there after build
+- Deploy: `cp output/prompt-grid ~/bin/prompt-grid && ~/bin/auto restart prompt-grid`
 
 ### Scrollback Viewing
 - Mouse wheel scrolls through terminal history
@@ -196,8 +196,8 @@ Rename sessions:
 - Auto-reconnects with exponential backoff (1s to 10 min) on disconnect
 - Daemon stays running when control window closes (for Discord-only operation)
 - Commands: `/term list`, `/term new`, `/term screenshot`, `/term run`, `/term connect`, `/term disconnect`, `/term focus`, `/term close`
-- Token stored in macOS keyring (`claude-term/discord_bot_token`)
-- Logs to `~/.config/claude-term/discord.log`
+- Token stored in macOS keyring (`prompt-grid/discord_bot_token`)
+- Logs to `~/.config/prompt-grid/discord.log`
 
 #### Session Lifecycle Integration
 - Auto-creates Discord channels for each terminal session in a dedicated category
@@ -218,7 +218,7 @@ Rename sessions:
 - **IPC server**: 5s deadline on connections to prevent hung goroutines
 - **termWidgets cleanup**: stale entries cleaned alongside tabStates in control window layout
 - **PTY log cap**: 10MB per session, auto-truncated to 5MB at safe boundary (`\n` or ESC byte)
-- **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/claude-term/memdump-{timestamp}.log`.
+- **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/prompt-grid/memdump-{timestamp}.log`.
 
 ## Testing
 149 tests covering emulator, PTY, PTY log persistence, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes, session metadata persistence, session recreation after reboot.
@@ -226,8 +226,8 @@ Rename sessions:
 ### Test Isolation with Realms
 - `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories
 - Tests set unique realm: `test-{pid}-{timestamp}`
-- tmux server: `claude-term-{realm}` (isolated from production)
-- Socket directory: `/tmp/claude-term-{realm}/`
+- tmux server: `prompt-grid-{realm}` (isolated from production)
+- Socket directory: `/tmp/prompt-grid-{realm}/`
 - Complete isolation from production instance
 - TestMain cleans up via `tmux.KillServer()` and removes realm directory
 - **CRITICAL**: TestMain sets `HOME` to temp dir and `SHELL=/bin/bash` to avoid user's slow shell init files (.zshrc/.bashrc) blocking tmux sessions. Without this, the shell inside tmux never becomes interactive during tests.

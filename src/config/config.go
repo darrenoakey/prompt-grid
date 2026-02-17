@@ -38,9 +38,9 @@ type DiscordConfig struct {
 func configSearchPaths() []string {
 	paths := []string{}
 
-	// First: ~/.config/claude-term/config.json (standard user config location)
+	// First: ~/.config/prompt-grid/config.json (standard user config location)
 	if home, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(home, ".config", "claude-term", "config.json"))
+		paths = append(paths, filepath.Join(home, ".config", "prompt-grid", "config.json"))
 	}
 
 	// Second: local/ directory relative to executable (for development)

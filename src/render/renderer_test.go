@@ -6,7 +6,7 @@ import (
 	"image/color"
 	"testing"
 
-	"claude-term/src/emulator"
+	"prompt-grid/src/emulator"
 )
 
 func TestCellStyleFromAttrs(t *testing.T) {

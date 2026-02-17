@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"claude-term/src/emulator"
+	"prompt-grid/src/emulator"
 )
 
 // TestDriver provides programmatic control of GUI for testing.

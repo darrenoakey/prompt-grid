@@ -12,12 +12,12 @@ import (
 
 	"gioui.org/app"
 
-	"claude-term/src/config"
-	"claude-term/src/discord"
-	"claude-term/src/gui"
-	"claude-term/src/ipc"
-	"claude-term/src/memwatch"
-	"claude-term/src/tmux"
+	"prompt-grid/src/config"
+	"prompt-grid/src/discord"
+	"prompt-grid/src/gui"
+	"prompt-grid/src/ipc"
+	"prompt-grid/src/memwatch"
+	"prompt-grid/src/tmux"
 )
 
 const daemonEnvVar = "CLAUDE_TERM_DAEMON"
@@ -140,7 +140,7 @@ func runDaemon() {
 		os.Exit(1)
 	}
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		fmt.Fprintln(os.Stderr, "Another claude-term daemon is already running, exiting")
+		fmt.Fprintln(os.Stderr, "Another prompt-grid daemon is already running, exiting")
 		lockFile.Close()
 		os.Exit(0)
 	}
@@ -242,16 +242,16 @@ func runDaemon() {
 }
 
 func printUsage() {
-	fmt.Println(`claude-term - Terminal emulator with multi-view support
+	fmt.Println(`prompt-grid - Terminal emulator with multi-view support
 
 Usage:
-  claude-term <session-name>              Create a new local session
-  claude-term ssh <host> [session-name]   Create an SSH session
+  prompt-grid <session-name>              Create a new local session
+  prompt-grid ssh <host> [session-name]   Create an SSH session
 
 Examples:
-  claude-term "My Project"
-  claude-term ssh user@host "Remote Work"
-  claude-term ssh myserver`)
+  prompt-grid "My Project"
+  prompt-grid ssh user@host "Remote Work"
+  prompt-grid ssh myserver`)
 }
 
 func findArg(name string) int {

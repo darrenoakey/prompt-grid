@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"claude-term/src/config"
-	"claude-term/src/ptylog"
-	"claude-term/src/tmux"
+	"prompt-grid/src/config"
+	"prompt-grid/src/ptylog"
+	"prompt-grid/src/tmux"
 )
 
 var testRealm string
@@ -23,7 +23,7 @@ func TestMain(m *testing.M) {
 
 	// Use a clean shell environment so tests don't wait for user's shell init
 	// files (.zshrc, .bashrc, etc.) which can be slow or block indefinitely.
-	tmpHome, _ := os.MkdirTemp("", "claude-term-test-home-")
+	tmpHome, _ := os.MkdirTemp("", "prompt-grid-test-home-")
 	os.Setenv("HOME", tmpHome)
 	os.Setenv("SHELL", "/bin/bash")
 
@@ -192,7 +192,7 @@ func TestTmuxSessionLifecycle(t *testing.T) {
 
 func TestSessionMetadataPersistence(t *testing.T) {
 	// Create a temp config file
-	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "claude-term", "config.json")
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "prompt-grid", "config.json")
 	os.MkdirAll(filepath.Dir(cfgPath), 0755)
 	cfg := &config.Config{}
 
@@ -236,7 +236,7 @@ func TestSessionMetadataPersistence(t *testing.T) {
 }
 
 func TestSessionMetadataDeletedOnClose(t *testing.T) {
-	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "claude-term", "config.json")
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "prompt-grid", "config.json")
 	os.MkdirAll(filepath.Dir(cfgPath), 0755)
 	cfg := &config.Config{}
 
@@ -265,7 +265,7 @@ func TestSessionMetadataDeletedOnClose(t *testing.T) {
 }
 
 func TestSessionMetadataRename(t *testing.T) {
-	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "claude-term", "config.json")
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "prompt-grid", "config.json")
 	os.MkdirAll(filepath.Dir(cfgPath), 0755)
 	cfg := &config.Config{}
 
@@ -321,7 +321,7 @@ func TestPtyLogCreatedWithSession(t *testing.T) {
 }
 
 func TestSessionRecreateAfterTmuxDeath(t *testing.T) {
-	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "claude-term", "config.json")
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "prompt-grid", "config.json")
 	os.MkdirAll(filepath.Dir(cfgPath), 0755)
 	cfg := &config.Config{}
 
@@ -395,7 +395,7 @@ func TestSessionRecreateAfterTmuxDeath(t *testing.T) {
 }
 
 func TestReconnectSessionRestoresScrollback(t *testing.T) {
-	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "claude-term", "config.json")
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "prompt-grid", "config.json")
 	os.MkdirAll(filepath.Dir(cfgPath), 0755)
 	cfg := &config.Config{}
 

@@ -30,8 +30,8 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
-	"claude-term/src/pty"
-	"claude-term/src/render"
+	"prompt-grid/src/pty"
+	"prompt-grid/src/render"
 )
 
 const sidebarWidth = 240
@@ -140,7 +140,7 @@ func NewControlWindow(application *App) *ControlWindow {
 	}
 
 	win.window.Option(
-		app.Title("claude-term"),
+		app.Title("prompt-grid"),
 		app.Size(unit.Dp(width), unit.Dp(height)),
 	)
 

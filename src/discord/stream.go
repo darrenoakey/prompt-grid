@@ -6,7 +6,7 @@ import (
 	"time"
 	"unicode"
 
-	"claude-term/src/gui"
+	"prompt-grid/src/gui"
 )
 
 const (

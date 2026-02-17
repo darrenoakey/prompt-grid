@@ -25,7 +25,7 @@ type Parser interface {
 // LogDir returns the directory where PTY logs are stored
 func LogDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "claude-term", "sessions")
+	return filepath.Join(home, ".config", "prompt-grid", "sessions")
 }
 
 // LogPath returns the log file path for a session name

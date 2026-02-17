@@ -1,4 +1,4 @@
-module claude-term
+module prompt-grid
 
 go 1.22
 
