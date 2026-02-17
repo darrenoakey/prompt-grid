@@ -1,4 +1,4 @@
-# Claude-Term Project Notes
+# prompt-grid Project Notes
 
 ## Project Overview
 A Go terminal emulator with multi-view support using Gio for GUI, Discord integration for remote control.
