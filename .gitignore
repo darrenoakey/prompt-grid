@@ -1,12 +1,12 @@
 # Binary
-claude-term
+prompt-grid
 
 # Local configuration (contains secrets references)
 local/
 
 # Output logs (but keep the binary)
 output/20*/
-!output/claude-term
+output/prompt-grid
 
 # Go build cache
 *.exe
