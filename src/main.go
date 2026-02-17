@@ -146,6 +146,9 @@ func runDaemon() {
 	}
 	// Keep lockFile open for process lifetime (lock released on exit)
 
+	// Set macOS dock icon
+	setDockIcon()
+
 	// Ensure tmux is available
 	if err := tmux.EnsureInstalled(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
