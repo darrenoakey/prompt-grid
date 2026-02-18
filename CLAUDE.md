@@ -67,13 +67,24 @@ PTY log writer (`src/ptylog/`):
 Session types persisted in config:
 - `"shell"` — default local sessions (recreated with saved workDir)
 - `"ssh"` — SSH sessions (recreated with `ssh <host>`)
-- `"claude"` — Claude sessions (recreated with workDir + `claude` command sent via SendKeys)
+- `"claude"` — Claude sessions (recreated with `claude --continue` to resume last conversation)
+- `"codex"` — Codex sessions (recreated with `codex --resume`)
+
+### Working Directory Tracking (CWD Persistence)
+- `workDir` in `SessionInfo` is updated every 30s via `App.updateAllCWDs()`
+- Uses `tmux.GetPaneCurrentPath(name)` → `tmux display-message -p -t <name> "#{pane_current_path}"`
+- Only non-SSH sessions are tracked (SSH CWD is remote, meaningless locally)
+- Goroutine started in `NewApp()` via `startCWDUpdater()` — lives for app lifetime
+- Tests call `app.updateAllCWDs()` directly instead of waiting 30s
+- **macOS path symlink gotcha**: tmux reports resolved paths (`/private/var` not `/var`). Tests must use `filepath.EvalSymlinks` when comparing expected vs actual workDir.
+- `CLAUDE_BINARY_PATH` env var overrides the claude binary path — used in tests to point at a fake script
 
 tmux wrapper (`src/tmux/tmux.go`):
 - `ServerName()` - realm-aware tmux server name
 - `NewSession(name, workDir string, cols, rows uint16, cmd ...string)` - create detached tmux session with optional working directory and initial command
 - `AttachArgs(name)` - returns cmd/args for `pty.StartCommand()`
 - `SendKeys(name string, keys ...string)` - send keystrokes to a tmux session
+- `GetPaneCurrentPath(name)` - current working directory of active pane via `display-message`
 - `ListSessions()` / `HasSession()` / `KillSession()` / `RenameSession()`
 - `KillServer()` - for test cleanup
 - `GetSocketDir()` - IPC socket directory (realm-aware)
@@ -126,10 +137,11 @@ New Claude Session:
 - Uses `tmux.SendKeys` to send "claude\nEnter" to the shell after session creation
 - Duplicate names get `-2`, `-3` etc. suffixes
 
-### Working Directory
+### Working Directory (Initial)
 - All new sessions (via context menu or IPC) default to `~/src` as working directory
 - SSH sessions skip the working directory (they run on the remote host)
 - `AddClaudeSession(name, dir)` creates a session in a specific directory and runs `claude`
+- CWD is tracked continuously — see "Working Directory Tracking" section above
 
 Rename sessions:
 - Right-click tab → "Rename" opens inline text editor
@@ -221,7 +233,7 @@ Rename sessions:
 - **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/prompt-grid/memdump-{timestamp}.log`.
 
 ## Testing
-149 tests covering emulator, PTY, PTY log persistence, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes, session metadata persistence, session recreation after reboot.
+170 tests covering emulator, PTY, PTY log persistence, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes, session metadata persistence, session recreation after reboot, CWD tracking, claude --continue on recreate.
 
 ### Test Isolation with Realms
 - `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories
