@@ -34,13 +34,13 @@ jobs:
         with:
           name: prompt-grid-darwin-arm64
           path: output/prompt-grid-darwin-arm64
-          retention-days: 30
+          retention-days: 7
 
       - uses: actions/upload-artifact@v4
         with:
           name: prompt-grid-darwin-amd64
           path: output/prompt-grid-darwin-amd64
-          retention-days: 30
+          retention-days: 7
 
   build-linux-amd64:
     name: Build Linux (amd64)
@@ -78,4 +78,28 @@ jobs:
         with:
           name: prompt-grid-linux-amd64
           path: output/prompt-grid-linux-amd64
-          retention-days: 30
+          retention-days: 7
+
+  release:
+    name: Create Release
+    needs: [build-macos, build-linux-amd64]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ github.run_number }}" \
+            "artifacts/prompt-grid-darwin-arm64/prompt-grid-darwin-arm64" \
+            "artifacts/prompt-grid-darwin-amd64/prompt-grid-darwin-amd64" \
+            "artifacts/prompt-grid-linux-amd64/prompt-grid-linux-amd64" \
+            --repo "${{ github.repository }}" \
+            --title "Build v${{ github.run_number }}" \
+            --notes "Commit: ${{ github.sha }}"
