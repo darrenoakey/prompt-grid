@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -443,5 +444,93 @@ func TestReconnectSessionRestoresScrollback(t *testing.T) {
 		t.Error("scrollback should be restored from PTY log on reconnect")
 	}
 
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestCWDTracking(t *testing.T) {
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "prompt-grid", "config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0755)
+	cfg := &config.Config{}
+
+	app := NewApp(cfg, cfgPath)
+
+	_, err := app.NewSession("test-cwd-track", "", "/tmp")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer app.CloseSession("test-cwd-track")
+
+	// Wait for shell to become interactive
+	time.Sleep(500 * time.Millisecond)
+
+	// Change directory in the tmux session
+	if err := tmux.SendKeys("test-cwd-track", "cd /var", "Enter"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// Trigger CWD update directly (instead of waiting 30s)
+	app.updateAllCWDs()
+
+	// Verify config was updated to new directory.
+	// Use EvalSymlinks because macOS resolves /var → /private/var etc.
+	wantResolved, _ := filepath.EvalSymlinks("/var")
+
+	info, ok := cfg.GetSessionInfo("test-cwd-track")
+	if !ok {
+		t.Fatal("session info should exist")
+	}
+	gotResolved, _ := filepath.EvalSymlinks(info.WorkDir)
+	if gotResolved != wantResolved {
+		t.Errorf("WorkDir = %q (resolved: %q), want /var (resolved: %q)", info.WorkDir, gotResolved, wantResolved)
+	}
+}
+
+func TestClaudeRecreateUsesContinue(t *testing.T) {
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "prompt-grid", "config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0755)
+	cfg := &config.Config{}
+
+	// Create a fake claude script that records its args and stays running
+	claudeDir := filepath.Join(os.Getenv("HOME"), ".local", "bin")
+	os.MkdirAll(claudeDir, 0755)
+	claudePath := filepath.Join(claudeDir, "claude")
+	argsFile := filepath.Join(os.Getenv("HOME"), "claude-args.txt")
+	script := "#!/bin/bash\necho \"$@\" > " + argsFile + "\nsleep 30\n"
+	if err := os.WriteFile(claudePath, []byte(script), 0755); err != nil {
+		t.Fatalf("WriteFile claude script: %v", err)
+	}
+
+	// Save a claude session in config (simulating pre-reboot state)
+	cfg.SetSessionInfo("test-claude-continue", config.SessionInfo{
+		Type:    "claude",
+		WorkDir: "/tmp",
+	})
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatalf("Save config: %v", err)
+	}
+
+	// NewApp will discover no live tmux sessions and call recreateSession
+	app := NewApp(cfg, cfgPath)
+
+	// Session should have been recreated
+	state := app.GetSession("test-claude-continue")
+	if state == nil {
+		t.Fatal("claude session should be recreated after reboot")
+	}
+
+	// Wait for script to start and write its args
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify --continue was passed to claude
+	argsData, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("claude args file not written (claude script may not have started): %v", err)
+	}
+	if !strings.Contains(string(argsData), "--continue") {
+		t.Errorf("claude was not started with --continue, got args: %q", string(argsData))
+	}
+
+	app.CloseSession("test-claude-continue")
 	time.Sleep(100 * time.Millisecond)
 }

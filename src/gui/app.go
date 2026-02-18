@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"gioui.org/app"
 	"gioui.org/unit"
@@ -265,7 +266,57 @@ func NewApp(cfg *config.Config, cfgPath string) *App {
 	// Mark startup complete: any session exit after this point is intentional
 	a.startupComplete = true
 
+	// Start background goroutine to track current working directories
+	a.startCWDUpdater()
+
 	return a
+}
+
+// startCWDUpdater starts a background goroutine that polls each session's current
+// working directory every 30 seconds and saves any changes to config.
+// This ensures the saved workDir reflects where the user actually is when the
+// app restarts, not just where the session was originally created.
+func (a *App) startCWDUpdater() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			a.updateAllCWDs()
+		}
+	}()
+}
+
+// updateAllCWDs polls tmux for the current working directory of each local
+// (non-SSH) session and saves any changes to config.
+func (a *App) updateAllCWDs() {
+	a.mu.RLock()
+	var names []string
+	for name, state := range a.sessions {
+		if !state.IsSSH() {
+			names = append(names, name)
+		}
+	}
+	a.mu.RUnlock()
+
+	if len(names) == 0 || a.config == nil {
+		return
+	}
+
+	changed := false
+	for _, name := range names {
+		cwd, err := tmux.GetPaneCurrentPath(name)
+		if err != nil || cwd == "" {
+			continue
+		}
+		if info, ok := a.config.GetSessionInfo(name); ok && info.WorkDir != cwd {
+			info.WorkDir = cwd
+			a.config.SetSessionInfo(name, info)
+			changed = true
+		}
+	}
+	if changed {
+		a.saveConfig()
+	}
 }
 
 // discoverSessions finds and reconnects to existing tmux sessions,
@@ -415,13 +466,16 @@ func (a *App) recreateSession(name string, info config.SessionInfo) error {
 		initialCmd = []string{"ssh", info.SSHHost}
 		workDir = "" // SSH sessions don't use local workDir
 	} else if info.Type == "claude" {
-		// Claude sessions run claude as the command (exits when claude exits)
-		claudePath := filepath.Join(os.Getenv("HOME"), ".local", "bin", "claude")
-		initialCmd = []string{claudePath}
+		// Claude sessions run claude --continue to resume the last conversation.
+		// CLAUDE_BINARY_PATH env var allows overriding the binary path (used in tests).
+		claudePath := os.Getenv("CLAUDE_BINARY_PATH")
+		if claudePath == "" {
+			claudePath = filepath.Join(os.Getenv("HOME"), ".local", "bin", "claude")
+		}
+		initialCmd = []string{claudePath, "--continue"}
 	} else if info.Type == "codex" {
-		// Codex sessions run codex as the command (exits when codex exits)
-		// Use just "codex" to let PATH resolution find it
-		initialCmd = []string{"codex"}
+		// Codex sessions run codex --resume to continue the last conversation.
+		initialCmd = []string{"codex", "--resume"}
 	}
 	if err := tmux.NewSession(name, workDir, cols, rows, initialCmd...); err != nil {
 		return err

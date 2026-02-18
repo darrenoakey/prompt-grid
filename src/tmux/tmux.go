@@ -155,6 +155,17 @@ func RenameSession(old, new string) error {
 	return nil
 }
 
+// GetPaneCurrentPath returns the current working directory of a session's active pane.
+// Returns an empty string and error if the session doesn't exist.
+func GetPaneCurrentPath(name string) (string, error) {
+	cmd := exec.Command("tmux", "-L", ServerName(), "display-message", "-p", "-t", name, "#{pane_current_path}")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("tmux display-message failed: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // KillServer kills the entire tmux server (for test cleanup)
 func KillServer() error {
 	cmd := exec.Command("tmux", "-L", ServerName(), "kill-server")
