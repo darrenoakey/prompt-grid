@@ -10,6 +10,21 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 ~/bin/prompt-grid "Session Name"  # Launch (runs in background via nohup)
 ```
 
+## CI / GitHub Actions
+Workflow: `.github/workflows/build.yml` — builds on every push/PR.
+- `macos-latest` → `prompt-grid-darwin-arm64` (Apple Silicon)
+- `macos-13` → `prompt-grid-darwin-amd64` (Intel)
+- `ubuntu-latest` → `prompt-grid-linux-amd64`
+
+**Windows not supported**: project uses `syscall.Flock`, `creack/pty`, and tmux — all Unix-only.
+
+Linux runner needs Gio CGO headers:
+```
+gcc pkg-config libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev
+libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev libvulkan-dev
+```
+macOS runners work out of the box (Xcode CLT pre-installed, handles ObjC CGO in `icon_darwin.go`).
+
 ## Key Architecture
 
 ### Package Structure
