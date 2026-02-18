@@ -106,8 +106,8 @@ tmux wrapper (`src/tmux/tmux.go`):
 - Keyboard: `key.Filter{Optional: key.ModShift|key.ModCtrl|key.ModCommand}` for all keys — but Tab requires explicit `key.Filter{Name: key.NameTab}` (see gotcha below)
 - Handle both `key.Event` and `key.EditEvent` - EditEvent has proper text, Event has key names
 - Key names are uppercase (e.g., "A" for 'a' key) - must handle shift for proper case
-- Clipboard: `clipboard.WriteCmd`/`clipboard.ReadCmd` with `transfer.TargetFilter` for paste events
-- **CRITICAL (clipboard MIME type)**: Gio uses `"application/text"` NOT `"text/plain"` for clipboard operations. Using `"text/plain"` in `clipboard.WriteCmd` or `transfer.TargetFilter` will silently fail — data never arrives.
+- Copy: `clipboard.WriteCmd{Type: "application/text", Data: io.NopCloser(...)}` — Gio uses `"application/text"` NOT `"text/plain"` (using wrong type silently fails)
+- Paste: `exec.Command("pbpaste").Output()` in a goroutine → `ptySess.Write(out)`. Do NOT use `clipboard.ReadCmd` + `transfer.TargetFilter` — only works for Gio-internal clipboard (MIME type mismatch breaks cross-app paste, and it alters clipboard state)
 - Click-to-focus requires handling `pointer.Filter` events manually
 
 ### Session Colors
@@ -222,7 +222,7 @@ Rename sessions:
 - Claude UI footer (prompt/status lines) stripped from streamed output via `stripClaudeFooter()`
 
 ### Memory Safeguards
-- **Scrollback cap**: 100K lines per session, oldest chunks trimmed (`src/emulator/scrollback.go`)
+- **Scrollback cap**: 10K lines per session (~416 screens), oldest chunks trimmed (`src/emulator/scrollback.go`). Reduced from 100K to prevent OOM — 29 sessions × 10K × 120 cols × 16 bytes ≈ 556MB
 - **Parser caps**: intermediate string (64B), OSC string (64KB) — resets to ground on overflow
 - **PTY readLoop**: passes `buf[:n]` directly to parser (no per-read allocation)
 - **Gio themes**: `material.NewTheme()` called once at construction, stored as persistent field on ControlWindow and TerminalWidget — NOT per-frame
