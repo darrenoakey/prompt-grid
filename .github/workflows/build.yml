@@ -22,8 +22,13 @@ jobs:
           go build -o output/prompt-grid-darwin-arm64 ./src
 
       - name: Build amd64 (Intel)
+        env:
+          GOARCH: amd64
+          CGO_ENABLED: "1"
+          CC: clang -arch x86_64
+          CXX: clang++ -arch x86_64
         run: |
-          GOARCH=amd64 go build -o output/prompt-grid-darwin-amd64 ./src
+          go build -o output/prompt-grid-darwin-amd64 ./src
 
       - uses: actions/upload-artifact@v4
         with:
