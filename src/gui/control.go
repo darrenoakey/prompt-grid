@@ -8,6 +8,7 @@ import (
 	_ "image/png"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -20,7 +21,6 @@ import (
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 	"gioui.org/io/system"
-	"gioui.org/io/transfer"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -1490,14 +1490,12 @@ func (w *ControlWindow) handleTerminalKeyboard(gtx layout.Context) {
 		}
 		switch e := ev.(type) {
 		case key.EditEvent:
-			fmt.Fprintf(os.Stderr, "PASTE-DBG: EditEvent Text=%q len=%d\n", e.Text, len(e.Text))
 			state.ClearSelection()
 			if len(e.Text) > 0 {
 				state.pty.Write([]byte(e.Text))
 			}
 		case key.Event:
 			if e.State == key.Press {
-				fmt.Fprintf(os.Stderr, "PASTE-DBG: KeyEvent Name=%q Mods=%v State=%v\n", e.Name, e.Modifiers, e.State)
 				if e.Modifiers.Contain(key.ModCommand) && e.Name == "C" {
 					// Cmd+C: copy selection
 					if state.HasSelection() {
@@ -1522,33 +1520,17 @@ func (w *ControlWindow) handleTerminalKeyboard(gtx layout.Context) {
 						state.ClearSelection()
 					}
 				} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "V" {
-					// Cmd+V: paste — request clipboard read
-					gtx.Execute(clipboard.ReadCmd{Tag: w})
+					// Cmd+V: paste via pbpaste so any MIME type works and clipboard is never altered.
+					ptySess := state.pty
+					go func() {
+						out, err := exec.Command("pbpaste").Output()
+						if err == nil && len(out) > 0 {
+							ptySess.Write(out)
+						}
+					}()
 				} else {
 					state.ClearSelection()
 					w.forwardKeyToSession(state, e)
-				}
-			}
-		}
-	}
-
-	// Process clipboard paste data
-	for {
-		ev, ok := gtx.Event(
-			transfer.TargetFilter{Target: w, Type: "application/text"},
-		)
-		if !ok {
-			break
-		}
-		if e, ok := ev.(transfer.DataEvent); ok {
-			fmt.Fprintf(os.Stderr, "PASTE-DBG: DataEvent Type=%q\n", e.Type)
-			data := e.Open()
-			if data != nil {
-				content, _ := io.ReadAll(data)
-				data.Close()
-				fmt.Fprintf(os.Stderr, "PASTE-DBG: DataEvent content=%q len=%d\n", content, len(content))
-				if len(content) > 0 {
-					state.pty.Write(content)
 				}
 			}
 		}

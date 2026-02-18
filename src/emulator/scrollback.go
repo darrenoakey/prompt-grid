@@ -2,8 +2,8 @@ package emulator
 
 import "unsafe"
 
-const chunkSize = 1024   // Lines per chunk
-const maxLines = 100_000 // Maximum scrollback lines per session (~100 chunks)
+const chunkSize = 1024  // Lines per chunk
+const maxLines = 10_000 // Maximum scrollback lines per session (~10 chunks, ~416 screens)
 
 // Scrollback manages scrollback history using chunked storage, capped at maxLines
 type Scrollback struct {

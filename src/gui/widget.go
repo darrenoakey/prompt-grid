@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"os/exec"
 	"strings"
 
 	"gioui.org/font"
@@ -11,7 +12,6 @@ import (
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
-	"gioui.org/io/transfer"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -252,8 +252,14 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 							w.state.ClearSelection()
 						}
 					} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "V" {
-						// Cmd+V for paste - request clipboard read
-						gtx.Execute(clipboard.ReadCmd{Tag: w})
+						// Cmd+V: paste via pbpaste so any MIME type works and clipboard is never altered.
+						ptySess := w.state.pty
+						go func() {
+							out, err := exec.Command("pbpaste").Output()
+							if err == nil && len(out) > 0 {
+								ptySess.Write(out)
+							}
+						}()
 					} else {
 						w.state.ClearSelection()
 						w.handleKeyEvent(e)
@@ -262,25 +268,6 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 			}
 		}
 
-		// Process clipboard paste events
-		for {
-			ev, ok := gtx.Event(
-				transfer.TargetFilter{Target: w, Type: "application/text"},
-			)
-			if !ok {
-				break
-			}
-			if e, ok := ev.(transfer.DataEvent); ok {
-				data := e.Open()
-				if data != nil {
-					content, _ := io.ReadAll(data)
-					data.Close()
-					if len(content) > 0 {
-						w.state.pty.Write(content)
-					}
-				}
-			}
-		}
 	}
 }
 
