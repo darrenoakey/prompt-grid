@@ -3,12 +3,10 @@ package gui
 import (
 	"image"
 	"image/color"
-	"io"
 	"os/exec"
 	"strings"
 
 	"gioui.org/font"
-	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
@@ -174,14 +172,15 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 					w.state.UpdateSelection(cellX, cellY)
 				case pointer.Release:
 					w.state.EndSelection()
-					// Copy selection to clipboard on release
+					// Copy selection to clipboard on release via pbcopy (cross-app compatible)
 					if w.state.HasSelection() {
 						selectedText := w.state.GetSelectedText()
 						if len(selectedText) > 0 {
-							gtx.Execute(clipboard.WriteCmd{
-								Type: "application/text",
-								Data: io.NopCloser(strings.NewReader(selectedText)),
-							})
+							go func() {
+								cmd := exec.Command("pbcopy")
+								cmd.Stdin = strings.NewReader(selectedText)
+								cmd.Run()
+							}()
 						}
 					}
 				}
@@ -228,26 +227,28 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 				}
 			case key.Event:
 				if e.State == key.Press {
-					// Handle Cmd+C for copy
+					// Handle Cmd+C for copy via pbcopy (cross-app compatible)
 					if e.Modifiers.Contain(key.ModCommand) && e.Name == "C" {
 						if w.state.HasSelection() {
 							selectedText := w.state.GetSelectedText()
 							if len(selectedText) > 0 {
-								gtx.Execute(clipboard.WriteCmd{
-									Type: "application/text",
-									Data: io.NopCloser(strings.NewReader(selectedText)),
-								})
+								go func() {
+									cmd := exec.Command("pbcopy")
+									cmd.Stdin = strings.NewReader(selectedText)
+									cmd.Run()
+								}()
 							}
 						}
 					} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "X" {
-						// Cmd+X for cut (copy selection, then clear it)
+						// Cmd+X for cut (copy via pbcopy, then clear selection)
 						if w.state.HasSelection() {
 							selectedText := w.state.GetSelectedText()
 							if len(selectedText) > 0 {
-								gtx.Execute(clipboard.WriteCmd{
-									Type: "application/text",
-									Data: io.NopCloser(strings.NewReader(selectedText)),
-								})
+								go func() {
+									cmd := exec.Command("pbcopy")
+									cmd.Stdin = strings.NewReader(selectedText)
+									cmd.Run()
+								}()
 							}
 							w.state.ClearSelection()
 						}

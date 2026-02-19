@@ -6,8 +6,9 @@ A Go terminal emulator with multi-view support using Gio for GUI, Discord integr
 ## Build & Test
 ```bash
 ./run build    # Build to output/prompt-grid
+./run deploy   # Build + deploy to ~/local/bin/ + restart via auto
 ./run test     # Run all tests
-~/bin/prompt-grid "Session Name"  # Launch (runs in background via nohup)
+~/local/bin/prompt-grid "Session Name"  # Launch (runs in background via nohup)
 ```
 
 ## CI / GitHub Actions
@@ -190,8 +191,11 @@ Rename sessions:
 
 ### Deployment
 - `./run build` outputs to `output/prompt-grid`
-- `auto` service runs `~/bin/prompt-grid --daemon` -- must copy binary there after build
-- Deploy: `cp output/prompt-grid ~/bin/prompt-grid && ~/bin/auto restart prompt-grid`
+- `./run deploy` builds, deploys to `~/local/bin/prompt-grid`, and restarts via auto
+- `auto` service runs `~/local/bin/prompt-grid --daemon` (NOT `~/bin/` — iCloud Drive invalidates signatures)
+- Binary must live in `~/local/bin/` (not iCloud). `~/bin/` is a symlink into `~/Library/Mobile Documents/com~apple~CloudDocs/bin/` which breaks code signatures.
+- After deploy, re-sign required: `codesign -s - --force ~/local/bin/prompt-grid` (run script handles this)
+- **macOS 26 Gio fix**: `CVDisplayLinkCreateWithActiveCGDisplays` fails on macOS 26 beta. Patched Gio is in `vendor-gio/gioui.org/` with nil-safe displayLink methods and graceful fallback when CVDisplayLink fails (VSync disabled, rendering still works via Invalidate())
 
 ### Scrollback Viewing
 - Mouse wheel scrolls through terminal history

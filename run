@@ -11,7 +11,20 @@ case "${1:-help}" in
     build)
         echo "Building prompt-grid..."
         go build -o "$OUTPUT" ./src
+        codesign -s - --force "$OUTPUT" 2>/dev/null && true
         echo "Build successful: $OUTPUT"
+        ;;
+    deploy)
+        echo "Building and deploying prompt-grid..."
+        go build -o "$OUTPUT" ./src
+        codesign -s - --force "$OUTPUT" 2>/dev/null && true
+        DEPLOY_PATH="$HOME/local/bin/prompt-grid"
+        mkdir -p "$(dirname "$DEPLOY_PATH")"
+        cp "$OUTPUT" "$DEPLOY_PATH"
+        codesign -s - --force "$DEPLOY_PATH" 2>/dev/null && true
+        echo "Deployed to $DEPLOY_PATH"
+        ~/bin/auto restart prompt-grid
+        echo "Restarted via auto"
         ;;
     test)
         echo "Running tests..."
@@ -34,6 +47,7 @@ case "${1:-help}" in
         echo ""
         echo "Commands:"
         echo "  build       Compile the binary"
+        echo "  deploy      Build, deploy to ~/local/bin/, and restart via auto"
         echo "  test        Run tests"
         echo "  dev         Build and run in dev mode"
         echo "  verify      Build and run all tests"

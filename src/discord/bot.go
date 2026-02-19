@@ -100,6 +100,7 @@ func NewBot(cfg *config.DiscordConfig, app *gui.App) (*Bot, error) {
 
 	// Set up handlers
 	session.AddHandler(bot.handleReady)
+	session.AddHandler(bot.handleResumed)
 	session.AddHandler(bot.handleInteraction)
 	session.AddHandler(bot.handleDisconnect)
 	session.AddHandler(bot.handleMessageCreate)
@@ -176,6 +177,22 @@ func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
 	b.registerCommands()
 
 	go b.syncSessionChannelsAndStreams()
+}
+
+// handleResumed fires when discordgo internally reconnects via RESUME (no READY event).
+// We update isConnected and cancel any pending manual reconnect attempt.
+func (b *Bot) handleResumed(s *discordgo.Session, r *discordgo.Resumed) {
+	discordLog.Printf("Discord session resumed")
+	b.mu.Lock()
+	b.isConnected = true
+	b.reconnectDelay = minReconnectDelay
+	b.mu.Unlock()
+
+	// Signal reconnect goroutine to stop (session is already up)
+	select {
+	case b.stopReconnect <- struct{}{}:
+	default:
+	}
 }
 
 func (b *Bot) handleDisconnect(s *discordgo.Session, d *discordgo.Disconnect) {
@@ -265,6 +282,11 @@ func (b *Bot) reconnect() {
 		}
 
 		discordLog.Printf("Attempting to reconnect (delay was %v)...", delay)
+
+		// Close first to clear any stale WebSocket state (discordgo may have
+		// already reconnected internally via RESUME, leaving wsConn non-nil).
+		// Ignore close error — the connection may already be gone.
+		_ = b.session.Close()
 
 		if err := b.session.Open(); err != nil {
 			discordLog.Printf("Reconnection failed: %v", err)
