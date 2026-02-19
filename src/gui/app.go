@@ -398,11 +398,23 @@ func (a *App) reconnectSession(name string) error {
 
 	// Create emulator components
 	screen := emulator.NewScreen(int(cols), int(rows))
-	scrollback := emulator.NewScrollback()
+	sbPath := emulator.ScrollbackPath(name)
+	scrollback, err := emulator.NewScrollbackWithPath(sbPath)
+	if err != nil {
+		scrollback = emulator.NewScrollback() // fallback to in-memory
+	}
 	parser := emulator.NewParser(screen, scrollback)
 
-	// Replay saved PTY log to restore scrollback
+	// Replay saved PTY log to restore screen state.
+	// If the scrollback file already has lines, enable replay mode to avoid
+	// duplicating history that is already persisted on disk.
+	// If the scrollback file is empty (first run or scrollback file absent),
+	// let the replay write lines to disk and the ring normally.
+	if scrollback.Count() > 0 {
+		scrollback.SetReplayMode(true)
+	}
 	ptylog.ReplayLog(name, parser)
+	scrollback.SetReplayMode(false)
 
 	// Start PTY log writer
 	logWriter, _ := ptylog.NewWriter(name)
@@ -485,11 +497,21 @@ func (a *App) recreateSession(name string, info config.SessionInfo) error {
 
 	// Create emulator components
 	screen := emulator.NewScreen(int(cols), int(rows))
-	scrollback := emulator.NewScrollback()
+	sbPath := emulator.ScrollbackPath(name)
+	scrollback, err := emulator.NewScrollbackWithPath(sbPath)
+	if err != nil {
+		scrollback = emulator.NewScrollback() // fallback to in-memory
+	}
 	parser := emulator.NewParser(screen, scrollback)
 
-	// Replay saved PTY log to restore scrollback
+	// Replay saved PTY log to restore screen state.
+	// If the scrollback file already has lines, enable replay mode to avoid
+	// duplicating history that is already persisted on disk.
+	if scrollback.Count() > 0 {
+		scrollback.SetReplayMode(true)
+	}
 	ptylog.ReplayLog(name, parser)
+	scrollback.SetReplayMode(false)
 
 	// Start PTY log writer
 	logWriter, _ := ptylog.NewWriter(name)
@@ -586,7 +608,11 @@ func (a *App) NewSession(name, sshHost, workDir string) (*SessionState, error) {
 
 	// Create emulator components
 	screen := emulator.NewScreen(int(cols), int(rows))
-	scrollback := emulator.NewScrollback()
+	sbPath := emulator.ScrollbackPath(name)
+	scrollback, err := emulator.NewScrollbackWithPath(sbPath)
+	if err != nil {
+		scrollback = emulator.NewScrollback() // fallback to in-memory
+	}
 	parser := emulator.NewParser(screen, scrollback)
 
 	// Start PTY log writer
@@ -663,8 +689,12 @@ func (a *App) newSessionWithCommand(name, workDir, command string) (*SessionStat
 
 	// Create emulator components
 	screen := emulator.NewScreen(int(cols), int(rows))
-	scrollback := emulator.NewScrollback()
-	parser := emulator.NewParser(screen, scrollback)
+	sbPath2 := emulator.ScrollbackPath(name)
+	scrollback2, err2 := emulator.NewScrollbackWithPath(sbPath2)
+	if err2 != nil {
+		scrollback2 = emulator.NewScrollback() // fallback to in-memory
+	}
+	parser := emulator.NewParser(screen, scrollback2)
 
 	// Start PTY log writer
 	logWriter, _ := ptylog.NewWriter(name)
@@ -677,7 +707,7 @@ func (a *App) newSessionWithCommand(name, workDir, command string) (*SessionStat
 		name:       name,
 		parser:     parser,
 		screen:     screen,
-		scrollback: scrollback,
+		scrollback: scrollback2,
 		colors:     sessionColor,
 		ptyLog:     logWriter,
 	}
@@ -826,14 +856,19 @@ func (a *App) CloseSession(name string) error {
 		state.ptyLog.Close()
 	}
 
+	if state.scrollback != nil {
+		state.scrollback.Close()
+	}
+
 	if state.pty != nil {
 		state.pty.Close()
 	}
 
 	tmux.KillSession(actualName)
 
-	// Remove saved color, window size, session info, and PTY log
+	// Remove saved color, window size, session info, PTY log, and scrollback
 	ptylog.DeleteLog(actualName)
+	emulator.DeleteScrollback(actualName)
 	if a.config != nil {
 		a.config.DeleteSessionColor(actualName)
 		a.config.DeleteWindowSize(actualName)
@@ -878,12 +913,20 @@ func (a *App) RenameSession(oldName, newName string) error {
 		return err
 	}
 
-	// Close old writer, rename log file, open new writer
+	// Close old log writer and scrollback, rename files, open new ones
 	if state.ptyLog != nil {
 		state.ptyLog.Close()
 	}
+	if state.scrollback != nil {
+		state.scrollback.Close()
+	}
 	ptylog.RenameLog(actualName, newName)
+	emulator.RenameScrollback(actualName, newName)
 	state.ptyLog, _ = ptylog.NewWriter(newName)
+	sbPath := emulator.ScrollbackPath(newName)
+	if sb, sbErr := emulator.NewScrollbackWithPath(sbPath); sbErr == nil {
+		state.scrollback = sb
+	}
 
 	// Move to new name
 	delete(a.sessions, actualName)
