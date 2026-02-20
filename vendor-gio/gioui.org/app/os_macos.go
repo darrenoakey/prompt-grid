@@ -7,10 +7,8 @@ package app
 
 import (
 	"errors"
-	"fmt"
 	"image"
 	"io"
-	"os"
 	"runtime"
 	"runtime/cgo"
 	"strings"
@@ -557,20 +555,9 @@ func (w *window) SetAnimating(anim bool) {
 	w.anim = anim
 	window := C.windowForView(w.view)
 	if w.anim && window != 0 && C.isMiniaturized(window) == 0 {
-		if w.displayLink != nil {
-			w.displayLink.Start()
-		}
-		// Always call setNeedsDisplay as a fallback to ensure drawRect: fires.
-		// When CVDisplayLink works normally, its callback already calls setNeedsDisplay —
-		// this just adds one redundant call at animation start (safe: macOS coalesces).
-		// When CVDisplayLink is nil or non-nil but broken (macOS 26+ beta where
-		// CVDisplayLinkCreateWithActiveCGDisplays fails or fires no callbacks),
-		// this is the only mechanism that drives frames, enabling paste and key events
-		// to be delivered. draw() also calls SetAnimating(true) each frame, so this
-		// creates a self-sustaining ~60fps loop whenever animation is active.
-		w.runOnMain(func() {
-			C.setNeedsDisplay(w.view)
-		})
+		// displayLink is always non-nil: either the real CVDisplayLink or the
+		// 60Hz ticker fallback created when CVDisplayLink is unavailable (macOS 26+).
+		w.displayLink.Start()
 	} else {
 		w.displayLink.Stop()
 	}
@@ -1064,7 +1051,9 @@ func (w *window) init(customRenderer bool) error {
 	}
 	scale := float32(C.getViewBackingScale(view))
 	w.scale = scale
-	dl, err := newDisplayLink(func() {
+	// newDisplayLink always succeeds: when CVDisplayLink is unavailable (macOS 26+
+	// beta) it falls back to a 60Hz ticker. The error return is no longer used.
+	w.displayLink, _ = newDisplayLink(func() {
 		select {
 		case w.redraw <- struct{}{}:
 		default:
@@ -1074,15 +1063,6 @@ func (w *window) init(customRenderer bool) error {
 			C.setNeedsDisplay(w.view)
 		})
 	})
-	w.displayLink = dl
-	if err != nil {
-		// CVDisplayLink creation failed (can happen on macOS 26+ beta when
-		// CVDisplayLinkCreateWithActiveCGDisplays is unavailable). Continue without
-		// VSync — the window will still render via explicit Invalidate() calls.
-		// We must NOT call CFRelease(view) here: that would trigger gio_onDestroy
-		// with h==0 (before gio_viewSetHandle) causing a panic.
-		fmt.Fprintf(os.Stderr, "gio: CVDisplayLink creation failed (%v); VSync disabled\n", err)
-	}
 	C.gio_viewSetHandle(view, C.uintptr_t(cgo.NewHandle(w)))
 	w.view = view
 	return nil

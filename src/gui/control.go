@@ -884,7 +884,7 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 			newCols := availW / cellW
 			newRows := availH / cellH
 			if newCols > 0 && newRows > 0 {
-				state.screen.Resize(newCols, newRows)
+				state.parser.Resize(newCols, newRows)
 				state.pty.Resize(pty.Size{Cols: uint16(newCols), Rows: uint16(newRows)})
 			}
 		}

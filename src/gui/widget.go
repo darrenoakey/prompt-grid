@@ -61,7 +61,7 @@ func (w *TerminalWidget) Layout(gtx layout.Context) layout.Dimensions {
 	padding := 8
 
 	// Calculate dimensions
-	cols, rows := w.state.screen.Size()
+	cols, rows := w.state.Screen().Size()
 	contentWidth := cols * w.cellW
 	contentHeight := rows * w.cellH
 	width := contentWidth + padding*2
@@ -145,7 +145,7 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 				cellY := (int(e.Position.Y) - padding) / w.cellH
 
 				// Clamp to screen bounds
-				cols, rows := w.state.screen.Size()
+				cols, rows := w.state.Screen().Size()
 				if cellX < 0 {
 					cellX = 0
 				}
@@ -336,7 +336,7 @@ func (w *TerminalWidget) handleKeyEvent(e key.Event) {
 }
 
 func (w *TerminalWidget) renderCells(gtx layout.Context) {
-	screen := w.state.screen
+	screen := w.state.Screen()
 	cols, rows := screen.Size()
 	scrollback := w.state.scrollback
 	scrollOffset := w.state.ScrollOffset()
@@ -457,7 +457,7 @@ func (w *TerminalWidget) drawChar(gtx layout.Context, th *material.Theme, px, py
 }
 
 func (w *TerminalWidget) renderCursor(gtx layout.Context) {
-	cursor := w.state.screen.Cursor()
+	cursor := w.state.Screen().Cursor()
 	// Only show cursor if terminal cursor is visible AND widget is focused
 	if !cursor.Visible || !w.focused {
 		return

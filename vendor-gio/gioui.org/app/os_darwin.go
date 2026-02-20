@@ -42,7 +42,6 @@ static CFTypeRef newNSString(unichar *chars, NSUInteger length) {
 import "C"
 
 import (
-	"errors"
 	"runtime/cgo"
 	"sync"
 	"sync/atomic"
@@ -130,10 +129,50 @@ func newDisplayLink(callback func()) (*displayLink, error) {
 	}
 	dl := C.gio_createDisplayLink()
 	if dl == 0 {
-		return nil, errors.New("app: failed to create display link")
+		// CVDisplayLink unavailable (e.g. macOS 26+ beta): use a 60Hz ticker as
+		// a software fallback. The displayLink is still returned (non-nil) so the
+		// rest of the Gio machinery works without change.
+		go d.runFallback()
+		return d, nil
 	}
 	go d.run(dl)
 	return d, nil
+}
+
+// runFallback drives animation at ~60fps using a time.Ticker when CVDisplayLink
+// is unavailable. It mirrors the state-machine of run() but without the C layer.
+func (d *displayLink) runFallback() {
+	var ticker *time.Ticker
+	var tchan <-chan time.Time
+	started := false
+	for {
+		select {
+		case <-tchan:
+			if atomic.LoadUint32(&d.running) != 0 {
+				d.callback()
+			}
+		case start := <-d.states:
+			if start && !started {
+				started = true
+				ticker = time.NewTicker(time.Second / 60)
+				tchan = ticker.C
+				atomic.StoreUint32(&d.running, 1)
+			} else if !start && started {
+				started = false
+				ticker.Stop()
+				ticker = nil
+				tchan = nil
+				atomic.StoreUint32(&d.running, 0)
+			}
+		case <-d.dids:
+			// No CVDisplayLink to reconfigure; drain the channel.
+		case <-d.done:
+			if ticker != nil {
+				ticker.Stop()
+			}
+			return
+		}
+	}
 }
 
 func (d *displayLink) run(dl C.CFTypeRef) {

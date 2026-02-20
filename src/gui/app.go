@@ -99,8 +99,13 @@ func (s *SessionState) SSHHost() string {
 	return s.sshHost
 }
 
-// Screen returns the screen buffer
+// Screen returns the current screen buffer (main or alternate, depending on
+// which the parser is currently writing to). Always use this rather than
+// accessing s.screen directly.
 func (s *SessionState) Screen() *emulator.Screen {
+	if s.parser != nil {
+		return s.parser.Screen()
+	}
 	return s.screen
 }
 
@@ -218,7 +223,7 @@ func (s *SessionState) GetSelectedText() string {
 		startX, endX = endX, startX
 	}
 
-	cols, _ := s.screen.Size()
+	cols, _ := s.Screen().Size()
 	var result []rune
 
 	for y := startY; y <= endY; y++ {
@@ -233,7 +238,7 @@ func (s *SessionState) GetSelectedText() string {
 		}
 
 		for x := lineStart; x <= lineEnd; x++ {
-			cell := s.screen.Cell(x, y)
+			cell := s.Screen().Cell(x, y)
 			if cell.Rune == 0 {
 				result = append(result, ' ')
 			} else {

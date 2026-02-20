@@ -164,12 +164,12 @@ func (d *TestDriver) GetScreenContent(sessionName string) [][]rune {
 	if state == nil {
 		return nil
 	}
-	cols, rows := state.screen.Size()
+	cols, rows := state.Screen().Size()
 	content := make([][]rune, rows)
 	for y := 0; y < rows; y++ {
 		content[y] = make([]rune, cols)
 		for x := 0; x < cols; x++ {
-			cell := state.screen.Cell(x, y)
+			cell := state.Screen().Cell(x, y)
 			if cell.Rune == 0 {
 				content[y][x] = ' '
 			} else {
@@ -199,7 +199,7 @@ func (d *TestDriver) GetCell(sessionName string, x, y int) emulator.Cell {
 	if state == nil {
 		return emulator.Cell{}
 	}
-	return state.screen.Cell(x, y)
+	return state.Screen().Cell(x, y)
 }
 
 // GetCursorPosition returns the cursor position
@@ -208,7 +208,7 @@ func (d *TestDriver) GetCursorPosition(sessionName string) (x, y int) {
 	if state == nil {
 		return 0, 0
 	}
-	cursor := state.screen.Cursor()
+	cursor := state.Screen().Cursor()
 	return cursor.X, cursor.Y
 }
 
@@ -272,7 +272,7 @@ func (d *TestDriver) GetScreenSize(sessionName string) (cols, rows int) {
 	if state == nil {
 		return 0, 0
 	}
-	return state.screen.Size()
+	return state.Screen().Size()
 }
 
 // --- Wait Helpers ---

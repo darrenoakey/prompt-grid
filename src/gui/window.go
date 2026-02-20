@@ -34,7 +34,7 @@ type TerminalWindow struct {
 // NewTerminalWindow creates a new terminal window
 func NewTerminalWindow(application *App, state *SessionState) *TerminalWindow {
 	// Calculate window size based on terminal dimensions plus padding
-	cols, rows := state.screen.Size()
+	cols, rows := state.Screen().Size()
 	cellW := int(float32(application.FontSize()) * 0.6)
 	cellH := int(float32(application.FontSize()) * 1.5)
 	padding := 16 // 8px on each side
@@ -96,7 +96,7 @@ func (w *TerminalWindow) Run() error {
 					newCols := newWidth / cellW
 					newRows := newHeight / cellH
 					if newCols > 0 && newRows > 0 {
-						w.state.screen.Resize(newCols, newRows)
+						w.state.parser.Resize(newCols, newRows)
 						w.state.pty.Resize(pty.Size{Cols: uint16(newCols), Rows: uint16(newRows)})
 					}
 				}
