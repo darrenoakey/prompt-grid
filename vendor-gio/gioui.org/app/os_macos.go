@@ -559,14 +559,18 @@ func (w *window) SetAnimating(anim bool) {
 	if w.anim && window != 0 && C.isMiniaturized(window) == 0 {
 		if w.displayLink != nil {
 			w.displayLink.Start()
-		} else {
-			// CVDisplayLink unavailable (macOS 26+ beta): trigger a single drawRect
-			// to ensure pending events (key presses, invalidations) are processed.
-			// setNeedsDisplay is coalesced by macOS so rapid calls are safe.
-			w.runOnMain(func() {
-				C.setNeedsDisplay(w.view)
-			})
 		}
+		// Always call setNeedsDisplay as a fallback to ensure drawRect: fires.
+		// When CVDisplayLink works normally, its callback already calls setNeedsDisplay —
+		// this just adds one redundant call at animation start (safe: macOS coalesces).
+		// When CVDisplayLink is nil or non-nil but broken (macOS 26+ beta where
+		// CVDisplayLinkCreateWithActiveCGDisplays fails or fires no callbacks),
+		// this is the only mechanism that drives frames, enabling paste and key events
+		// to be delivered. draw() also calls SetAnimating(true) each frame, so this
+		// creates a self-sustaining ~60fps loop whenever animation is active.
+		w.runOnMain(func() {
+			C.setNeedsDisplay(w.view)
+		})
 	} else {
 		w.displayLink.Stop()
 	}

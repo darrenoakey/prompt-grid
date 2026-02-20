@@ -195,7 +195,8 @@ Rename sessions:
 - `auto` service runs `~/local/bin/prompt-grid --daemon` (NOT `~/bin/` — iCloud Drive invalidates signatures)
 - Binary must live in `~/local/bin/` (not iCloud). `~/bin/` is a symlink into `~/Library/Mobile Documents/com~apple~CloudDocs/bin/` which breaks code signatures.
 - After deploy, re-sign required: `codesign -s - --force ~/local/bin/prompt-grid` (run script handles this)
-- **macOS 26 Gio fix**: `CVDisplayLinkCreateWithActiveCGDisplays` fails on macOS 26 beta. Patched Gio is in `vendor-gio/gioui.org/` with nil-safe displayLink methods and graceful fallback when CVDisplayLink fails (VSync disabled, rendering still works via Invalidate())
+- **macOS 26 Gio fix**: `CVDisplayLinkCreateWithActiveCGDisplays` fails on macOS 26 beta. Patched Gio in `vendor-gio/gioui.org/` makes displayLink nil-safe AND overrides `SetAnimating()` to call `C.setNeedsDisplay(w.view)` when `displayLink == nil`. **Critical**: nil-safe no-ops alone break paste/rendering — `SetAnimating(true)` must still trigger a frame. Without this, key events sit in `q.changes` forever and paste/keyboard never work. See `vendor-gio/gioui.org/app/os_macos.go` `SetAnimating()`.
+- **Test timing for tmux initial commands**: Scripts started as tmux initial commands take 500-800ms to run on macOS (shebang parse + bash startup + I/O). Tests must poll with a deadline (e.g., 3s), not use `time.Sleep(500ms)`. Also: use `t.Cleanup()` (not deferred code after `t.Fatalf`) to ensure tmux sessions are killed even when tests fail, preventing cross-test session pollution.
 
 ### Scrollback Viewing
 - Mouse wheel scrolls through terminal history
