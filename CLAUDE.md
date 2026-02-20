@@ -195,8 +195,17 @@ Rename sessions:
 - `auto` service runs `~/local/bin/prompt-grid --daemon` (NOT `~/bin/` — iCloud Drive invalidates signatures)
 - Binary must live in `~/local/bin/` (not iCloud). `~/bin/` is a symlink into `~/Library/Mobile Documents/com~apple~CloudDocs/bin/` which breaks code signatures.
 - After deploy, re-sign required: `codesign -s - --force ~/local/bin/prompt-grid` (run script handles this)
-- **macOS 26 Gio fix**: `CVDisplayLinkCreateWithActiveCGDisplays` fails on macOS 26 beta, or the link is created (non-nil) but fires no callbacks. Either way paste/keyboard breaks: key events sit in `q.changes` forever with no frame to deliver them. Patched Gio in `vendor-gio/gioui.org/` makes displayLink nil-safe AND overrides `SetAnimating()` to call `setNeedsDisplay` **unconditionally** (not just when displayLink==nil). The CVDisplayLink callback itself calls `setNeedsDisplay` normally — this is just the fallback for when it is nil or broken. `draw()` calls `SetAnimating(w.anim)` every frame, so this creates a self-sustaining ~60fps loop (macOS coalesces rapid calls). **Critical**: checking `displayLink == nil` is insufficient — must handle non-nil-but-broken too. See `vendor-gio/gioui.org/app/os_macos.go` `SetAnimating()`.
+- **macOS 26 Gio fix**: `CVDisplayLinkCreateWithActiveCGDisplays` fails on macOS 26 beta (returns nil). Without CVDisplayLink, `SetAnimating(true)` is a no-op — key events sit in `q.changes` forever with no frame to deliver them (paste/keyboard breaks). Fix in `vendor-gio/gioui.org/app/os_darwin.go`: `newDisplayLink()` detects nil return and starts a `runFallback()` goroutine using a `time.Ticker` at 60Hz — the ticker fires `d.callback()` just like the real CVDisplayLink would. `newDisplayLink` always returns non-nil `*displayLink`. `SetAnimating` calls `displayLink.Start()/Stop()` cleanly as before. **Do NOT use unconditional `setNeedsDisplay` in `SetAnimating`** — that creates a busy-loop: `draw()` → `SetAnimating` → `setNeedsDisplay` → `drawRect:` → `draw()` → ... at 94% CPU. The ticker-based fallback avoids this by controlling frame rate in the goroutine. See `vendor-gio/gioui.org/app/os_darwin.go` `newDisplayLink()`/`runFallback()`.
 - **Test timing for tmux initial commands**: Scripts started as tmux initial commands take 500-800ms to run on macOS (shebang parse + bash startup + I/O). Tests must poll with a deadline (e.g., 3s), not use `time.Sleep(500ms)`. Also: use `t.Cleanup()` (not deferred code after `t.Fatalf`) to ensure tmux sessions are killed even when tests fail, preventing cross-test session pollution.
+
+### Alternate Screen Buffer (?1049h/l)
+- `Parser` has `mainScreen *Screen` field (nil = on main screen, non-nil = on alt screen)
+- `?1049h` (set): saves current screen to `mainScreen`, creates new blank screen for alt
+- `?1049l` (clear): restores `mainScreen`, sets `mainScreen = nil`
+- `Parser.Screen()` always returns `p.screen` (current, whether main or alt)
+- `Parser.Resize()` resizes both `p.screen` AND `p.mainScreen` (if non-nil)
+- **CRITICAL**: tmux sends `?1049h` immediately on `attach-session`. ALL tmux output is on the "alternate screen" (mainScreen != nil). Do NOT suppress scrollback pushes based on `mainScreen != nil` — that breaks all scrollback for every tmux session.
+- **Always use `state.Screen()` method** (not `state.screen` field directly) to get the correct current screen through the parser delegation chain.
 
 ### Scrollback Viewing
 - Mouse wheel scrolls through terminal history
