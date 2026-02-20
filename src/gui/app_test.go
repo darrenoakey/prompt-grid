@@ -513,24 +513,37 @@ func TestClaudeRecreateUsesContinue(t *testing.T) {
 	// NewApp will discover no live tmux sessions and call recreateSession
 	app := NewApp(cfg, cfgPath)
 
+	// Always clean up - even if test fails via t.Fatal, we must kill the tmux session
+	// to avoid polluting subsequent tests that call NewApp (which discovers live sessions).
+	t.Cleanup(func() {
+		app.CloseSession("test-claude-continue")
+		time.Sleep(100 * time.Millisecond)
+	})
+
 	// Session should have been recreated
 	state := app.GetSession("test-claude-continue")
 	if state == nil {
 		t.Fatal("claude session should be recreated after reboot")
 	}
 
-	// Wait for script to start and write its args
-	time.Sleep(500 * time.Millisecond)
+	// Wait for script to start and write its args (poll up to 3s; tmux session start
+	// can take 500-800ms on macOS before the script runs).
+	var argsData []byte
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		argsData, err = os.ReadFile(argsFile)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	// Verify --continue was passed to claude
-	argsData, err := os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatalf("claude args file not written (claude script may not have started): %v", err)
+	if len(argsData) == 0 {
+		t.Fatalf("claude args file not written after 3s (claude script may not have started)")
 	}
 	if !strings.Contains(string(argsData), "--continue") {
 		t.Errorf("claude was not started with --continue, got args: %q", string(argsData))
 	}
-
-	app.CloseSession("test-claude-continue")
-	time.Sleep(100 * time.Millisecond)
 }

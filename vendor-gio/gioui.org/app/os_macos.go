@@ -557,7 +557,16 @@ func (w *window) SetAnimating(anim bool) {
 	w.anim = anim
 	window := C.windowForView(w.view)
 	if w.anim && window != 0 && C.isMiniaturized(window) == 0 {
-		w.displayLink.Start()
+		if w.displayLink != nil {
+			w.displayLink.Start()
+		} else {
+			// CVDisplayLink unavailable (macOS 26+ beta): trigger a single drawRect
+			// to ensure pending events (key presses, invalidations) are processed.
+			// setNeedsDisplay is coalesced by macOS so rapid calls are safe.
+			w.runOnMain(func() {
+				C.setNeedsDisplay(w.view)
+			})
+		}
 	} else {
 		w.displayLink.Stop()
 	}
