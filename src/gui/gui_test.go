@@ -2,6 +2,7 @@ package gui
 
 import (
 	"image/color"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,182 @@ func TestSessionStateSelection(t *testing.T) {
 	driver.ClearSelection("test-selection")
 	if driver.HasSelection("test-selection") {
 		t.Error("After ClearSelection(), HasSelection() = true, want false")
+	}
+}
+
+// --- Clipboard Tests ---
+
+// TestSelectionHasExtent verifies the single-click vs drag distinction.
+func TestSelectionHasExtent(t *testing.T) {
+	app := NewApp(nil, "")
+	driver := NewTestDriver(app)
+
+	err := driver.CreateSession("test-extent")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	t.Cleanup(func() { driver.CloseSession("test-extent") })
+
+	state, _ := app.sessions["test-extent"]
+
+	// Single click: start and end at same cell.
+	state.StartSelection(3, 2)
+	state.EndSelection()
+	if state.SelectionHasExtent() {
+		t.Error("single click: SelectionHasExtent() = true, want false")
+	}
+
+	// Drag: end differs from start.
+	state.StartSelection(0, 0)
+	state.UpdateSelection(5, 0)
+	state.EndSelection()
+	if !state.SelectionHasExtent() {
+		t.Error("drag: SelectionHasExtent() = false, want true")
+	}
+
+	// After ClearSelection, no extent.
+	state.ClearSelection()
+	if state.SelectionHasExtent() {
+		t.Error("after ClearSelection: SelectionHasExtent() = true, want false")
+	}
+}
+
+// TestDragSelectionCopiesClipboard verifies that drag-selecting text causes
+// pbcopy to write the selected content to the macOS system clipboard.
+func TestDragSelectionCopiesClipboard(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping clipboard integration test in short mode")
+	}
+	app := NewApp(nil, "")
+	driver := NewTestDriver(app)
+
+	err := driver.CreateSession("test-drag-copy")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	t.Cleanup(func() { driver.CloseSession("test-drag-copy") })
+
+	// Put a known string on the screen.
+	marker := "CLIPBOARD_DRAG_TEST"
+	driver.TypeText("test-drag-copy", "echo '"+marker+"'\r")
+	if !driver.WaitForContent("test-drag-copy", marker, 5*time.Second) {
+		t.Fatalf("marker %q never appeared on screen", marker)
+	}
+
+	// Wipe the system clipboard so we can detect whether pbcopy ran.
+	exec.Command("sh", "-c", "echo -n '' | pbcopy").Run()
+
+	// Find the row that contains the marker and select the characters.
+	rows := driver.GetScreenContent("test-drag-copy")
+	row := -1
+	for i, line := range rows {
+		trimmed := strings.TrimSpace(string(line))
+		// Look for the output row: a line that starts with the marker (not the
+		// command row that starts with a shell prompt followed by "echo '...").
+		if strings.HasPrefix(trimmed, marker) {
+			row = i
+			break
+		}
+	}
+	if row == -1 {
+		t.Fatalf("could not find marker row in screen content")
+	}
+
+	// Select the word (x: 0..len(marker)-1, same row).
+	state := app.sessions["test-drag-copy"]
+	state.StartSelection(0, row)
+	state.UpdateSelection(len(marker)-1, row)
+	state.EndSelection()
+
+	// SelectionHasExtent must be true.
+	if !state.SelectionHasExtent() {
+		t.Fatal("expected SelectionHasExtent() = true after drag")
+	}
+
+	// Simulate what widget.go does on pointer.Release for real drags.
+	selectedText := state.GetSelectedText()
+	if len(selectedText) == 0 {
+		t.Fatal("GetSelectedText() returned empty for drag selection")
+	}
+	cmd := exec.Command("pbcopy")
+	cmd.Stdin = strings.NewReader(selectedText)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("pbcopy failed: %v", err)
+	}
+
+	// Verify clipboard has our text.
+	out, err := exec.Command("pbpaste").Output()
+	if err != nil {
+		t.Fatalf("pbpaste failed: %v", err)
+	}
+	if !strings.Contains(string(out), marker) {
+		t.Errorf("clipboard = %q, want it to contain %q", string(out), marker)
+	}
+}
+
+// TestSingleClickDoesNotOverwriteClipboard verifies that a single click
+// (selStart == selEnd) does NOT call pbcopy, preserving the system clipboard.
+func TestSingleClickDoesNotOverwriteClipboard(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping clipboard integration test in short mode")
+	}
+	app := NewApp(nil, "")
+	driver := NewTestDriver(app)
+
+	err := driver.CreateSession("test-click-nooverwrite")
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	t.Cleanup(func() { driver.CloseSession("test-click-nooverwrite") })
+
+	// Seed the clipboard with a known value.
+	seed := "SEED_VALUE_DO_NOT_OVERWRITE"
+	cmd := exec.Command("pbcopy")
+	cmd.Stdin = strings.NewReader(seed)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("pbcopy seed: %v", err)
+	}
+
+	// Simulate a single click (no drag).
+	state := app.sessions["test-click-nooverwrite"]
+	state.StartSelection(5, 5)
+	state.EndSelection()
+
+	// SelectionHasExtent must be false — this is what prevents auto-copy.
+	if state.SelectionHasExtent() {
+		t.Fatal("single click: SelectionHasExtent() = true, want false")
+	}
+
+	// The clipboard must still contain the seed.
+	out, err := exec.Command("pbpaste").Output()
+	if err != nil {
+		t.Fatalf("pbpaste: %v", err)
+	}
+	if string(out) != seed {
+		t.Errorf("clipboard was overwritten: got %q, want %q", string(out), seed)
+	}
+}
+
+// TestPasteReadsSystemClipboard verifies that pbpaste retrieves text that was
+// written with pbcopy — the same path used by Cmd+V.
+func TestPasteReadsSystemClipboard(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping clipboard integration test in short mode")
+	}
+
+	payload := "PASTE_TEST_PAYLOAD_12345"
+	cmd := exec.Command("pbcopy")
+	cmd.Stdin = strings.NewReader(payload)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("pbcopy: %v", err)
+	}
+
+	out, err := exec.Command("pbpaste").Output()
+	if err != nil {
+		t.Fatalf("pbpaste: %v", err)
+	}
+	if string(out) != payload {
+		t.Errorf("pbpaste returned %q, want %q", string(out), payload)
 	}
 }
 

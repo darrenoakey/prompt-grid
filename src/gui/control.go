@@ -6,7 +6,6 @@ import (
 	"image"
 	"image/color"
 	_ "image/png"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,7 +15,6 @@ import (
 
 	"gioui.org/app"
 	"gioui.org/font"
-	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
@@ -1497,25 +1495,27 @@ func (w *ControlWindow) handleTerminalKeyboard(gtx layout.Context) {
 		case key.Event:
 			if e.State == key.Press {
 				if e.Modifiers.Contain(key.ModCommand) && e.Name == "C" {
-					// Cmd+C: copy selection
+					// Cmd+C: copy selection via pbcopy (cross-app, works on macOS 26+)
 					if state.HasSelection() {
 						selectedText := state.GetSelectedText()
 						if len(selectedText) > 0 {
-							gtx.Execute(clipboard.WriteCmd{
-								Type: "application/text",
-								Data: io.NopCloser(strings.NewReader(selectedText)),
-							})
+							go func() {
+								cmd := exec.Command("pbcopy")
+								cmd.Stdin = strings.NewReader(selectedText)
+								cmd.Run()
+							}()
 						}
 					}
 				} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "X" {
-					// Cmd+X: cut (copy + clear selection)
+					// Cmd+X: cut (copy via pbcopy, then clear selection)
 					if state.HasSelection() {
 						selectedText := state.GetSelectedText()
 						if len(selectedText) > 0 {
-							gtx.Execute(clipboard.WriteCmd{
-								Type: "application/text",
-								Data: io.NopCloser(strings.NewReader(selectedText)),
-							})
+							go func() {
+								cmd := exec.Command("pbcopy")
+								cmd.Stdin = strings.NewReader(selectedText)
+								cmd.Run()
+							}()
 						}
 						state.ClearSelection()
 					}

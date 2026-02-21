@@ -211,13 +211,17 @@ func (s *Screen) Clear() {
 // ClearLine clears the current line
 func (s *Screen) ClearLine(mode int) {
 	y := s.cursor.Y
+	curX := s.cursor.X
+	if curX >= s.cols {
+		curX = s.cols - 1
+	}
 	switch mode {
 	case 0: // From cursor to end
-		for x := s.cursor.X; x < s.cols; x++ {
+		for x := curX; x < s.cols; x++ {
 			s.cells[y][x] = DefaultCell()
 		}
 	case 1: // From start to cursor
-		for x := 0; x <= s.cursor.X; x++ {
+		for x := 0; x <= curX; x++ {
 			s.cells[y][x] = DefaultCell()
 		}
 	case 2: // Entire line
@@ -255,10 +259,14 @@ func (s *Screen) ClearScreen(mode int) {
 // InsertChars inserts n blank characters at cursor
 func (s *Screen) InsertChars(n int) {
 	y := s.cursor.Y
-	for x := s.cols - 1; x >= s.cursor.X+n; x-- {
+	curX := s.cursor.X
+	if curX >= s.cols {
+		return
+	}
+	for x := s.cols - 1; x >= curX+n; x-- {
 		s.cells[y][x] = s.cells[y][x-n]
 	}
-	for x := s.cursor.X; x < s.cursor.X+n && x < s.cols; x++ {
+	for x := curX; x < curX+n && x < s.cols; x++ {
 		s.cells[y][x] = DefaultCell()
 	}
 	s.dirty[y] = true
@@ -267,7 +275,11 @@ func (s *Screen) InsertChars(n int) {
 // DeleteChars deletes n characters at cursor
 func (s *Screen) DeleteChars(n int) {
 	y := s.cursor.Y
-	for x := s.cursor.X; x < s.cols-n; x++ {
+	curX := s.cursor.X
+	if curX >= s.cols {
+		return
+	}
+	for x := curX; x < s.cols-n; x++ {
 		s.cells[y][x] = s.cells[y][x+n]
 	}
 	for x := s.cols - n; x < s.cols; x++ {

@@ -166,6 +166,12 @@ func (s *SessionState) EndSelection() {
 	s.selecting = false
 }
 
+// SelectionHasExtent returns true only when the selection covers more than a
+// single point (i.e. the user actually dragged, not just clicked).
+func (s *SessionState) SelectionHasExtent() bool {
+	return s.hasSelection && (s.selStart.X != s.selEnd.X || s.selStart.Y != s.selEnd.Y)
+}
+
 // ClearSelection removes the current selection
 func (s *SessionState) ClearSelection() {
 	s.hasSelection = false

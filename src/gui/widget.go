@@ -172,8 +172,10 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 					w.state.UpdateSelection(cellX, cellY)
 				case pointer.Release:
 					w.state.EndSelection()
-					// Copy selection to clipboard on release via pbcopy (cross-app compatible)
-					if w.state.HasSelection() {
+					// Only auto-copy if the user dragged (not just clicked).
+					// A single click sets selStart==selEnd — auto-copying that one cell
+					// silently overwrites whatever was in the system clipboard.
+					if w.state.SelectionHasExtent() {
 						selectedText := w.state.GetSelectedText()
 						if len(selectedText) > 0 {
 							go func() {
@@ -182,6 +184,10 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 								cmd.Run()
 							}()
 						}
+					} else {
+						// Single click: clear point-selection so it does not render
+						// highlighted or interfere with future Cmd+C.
+						w.state.ClearSelection()
 					}
 				}
 			}
