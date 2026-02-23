@@ -122,8 +122,9 @@ tmux wrapper (`src/tmux/tmux.go`):
 - Keyboard: `key.Filter{Optional: key.ModShift|key.ModCtrl|key.ModCommand}` for all keys — but Tab requires explicit `key.Filter{Name: key.NameTab}` (see gotcha below)
 - Handle both `key.Event` and `key.EditEvent` - EditEvent has proper text, Event has key names
 - Key names are uppercase (e.g., "A" for 'a' key) - must handle shift for proper case
-- Copy: `clipboard.WriteCmd{Type: "application/text", Data: io.NopCloser(...)}` — Gio uses `"application/text"` NOT `"text/plain"` (using wrong type silently fails)
+- Copy: `exec.Command("pbcopy")` with `cmd.Stdin = strings.NewReader(text)` in a goroutine. Do NOT use `clipboard.WriteCmd` on macOS 26 — it is deferred to the next frame via `processFrame → updateState → WriteClipboard` and fails silently when CVDisplayLink is broken.
 - Paste: `exec.Command("pbpaste").Output()` in a goroutine → `ptySess.Write(out)`. Do NOT use `clipboard.ReadCmd` + `transfer.TargetFilter` — only works for Gio-internal clipboard (MIME type mismatch breaks cross-app paste, and it alters clipboard state)
+- **Single-click clipboard hijack**: `pointer.Release` must NOT auto-copy when `selStart == selEnd` (single click). Use `SessionState.SelectionHasExtent()` (selStart ≠ selEnd) as the guard. A single click would otherwise overwrite the system clipboard with one terminal character, breaking paste from other apps.
 - Click-to-focus requires handling `pointer.Filter` events manually
 
 ### Session Colors

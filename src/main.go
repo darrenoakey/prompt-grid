@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -204,6 +205,10 @@ func runDaemon() {
 		application.SetDiscordBot(bot)
 		application.AddSessionObserver(bot)
 	}
+
+	// Cap Go heap: GC runs aggressively when approaching this limit,
+	// preventing the balloon-to-2GB behaviour seen in Feb 2026 crashes.
+	debug.SetMemoryLimit(600 * 1024 * 1024) // 600 MB
 
 	// Start memory watchdog (monitors heap, crashes at 2GB with dump)
 	memwatch.Start(func() map[string]int {
