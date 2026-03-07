@@ -208,12 +208,25 @@ Rename sessions:
 - tmux sends `?1049h` immediately on `attach-session`. Do NOT suppress scrollback pushes based on `altScreen` — that breaks all scrollback for every tmux session.
 - **Always use `state.Screen()` method** (not `state.screen` field directly) to get the correct current screen through the parser delegation chain.
 
-### Scrollback Viewing
+### Scrollback Viewing & Scroll Mode
 - Mouse wheel scrolls through terminal history
 - `scrollOffset` in SessionState tracks view position (0 = live view)
 - Scroll up = increase offset (view history), scroll down = decrease (toward live)
-- Any new output auto-resets to live view (scrollOffset = 0)
+- **Scroll mode** (`scrollMode bool`): activated automatically when scrollOffset > 0
+  - `ResetScrollOffset()` becomes a no-op — new output doesn't snap to bottom
+  - `scrollOffset` compensated in OnData callback: when new scrollback lines push, offset increases by the same delta so `viewLine` arithmetic stays stable
+  - Scrollback trimming frozen (`SetFrozen(true)`) to prevent deleting lines being viewed
+  - Scrollbar (6px, right edge) and "▼ Current" button (bottom-right) rendered as overlay
+  - `ScrollToBottom()` exits scroll mode, unfreezes trimming, resets offset to 0
 - Rendering blends scrollback buffer + current screen based on offset
+- Cursor hidden when viewing history (scrollOffset > 0)
+
+### Prompt Detection
+- Background goroutine (`startPromptDetector`) scans each session screen every 500ms
+- `detectPromptStatus(screen)` in `src/gui/prompt.go` checks last non-empty line for shell/Claude patterns
+- Status values: `PromptNone`, `PromptShell` ($ % # > ❯), `PromptClaude` (Claude input prompt)
+- `PromptStatusValue` is atomic (`sync/atomic`) for lock-free reads from render thread
+- Control center tabs show indicators: ▸ (dim gray) for shell, ● (bright cyan) for Claude
 
 ### Gio Event Handling Gotchas
 - Widget state must persist across frames for events to match targets
@@ -263,7 +276,7 @@ Rename sessions:
 - **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/prompt-grid/memdump-{timestamp}.log`.
 
 ## Testing
-170 tests covering emulator, PTY, PTY log persistence, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes, session metadata persistence, session recreation after reboot, CWD tracking, claude --continue on recreate.
+195 tests covering emulator, PTY, PTY log persistence, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes, session metadata persistence, session recreation after reboot, CWD tracking, claude --continue on recreate, prompt detection.
 
 ### Test Isolation with Realms
 - `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories
