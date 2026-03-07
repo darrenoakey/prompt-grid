@@ -800,6 +800,35 @@ func (w *ControlWindow) layoutSessionItem(gtx layout.Context, tab *tabState, off
 		}
 		label.Layout(labelGtx)
 		stack.Pop()
+
+		// Prompt status indicator (right-aligned)
+		if state != nil {
+			ps := state.PromptStatus()
+			if ps != PromptNone {
+				var indicator string
+				var indicatorColor color.NRGBA
+				switch ps {
+				case PromptShell:
+					indicator = "▸"
+					indicatorColor = color.NRGBA{R: 120, G: 120, B: 120, A: 255} // dim gray
+				case PromptClaude:
+					indicator = "●"
+					indicatorColor = color.NRGBA{R: 0, G: 220, B: 180, A: 255} // bright cyan
+				}
+				iconLabel := material.Label(w.theme, unit.Sp(12), indicator)
+				iconLabel.Color = indicatorColor
+				iconLabel.Font.Weight = font.Bold
+				iconX := sidebarWidth - 20
+				iconStack := op.Offset(image.Pt(iconX, textY)).Push(gtx.Ops)
+				iconGtx := gtx
+				iconGtx.Constraints = layout.Constraints{
+					Min: image.Point{},
+					Max: image.Point{X: 16, Y: itemHeight},
+				}
+				iconLabel.Layout(iconGtx)
+				iconStack.Pop()
+			}
+		}
 	}
 
 	return layout.Dimensions{Size: image.Point{X: sidebarWidth, Y: itemHeight}}

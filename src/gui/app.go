@@ -67,10 +67,12 @@ type SessionState struct {
 	scrollback *emulator.Scrollback
 	window     *TerminalWindow
 	colors     render.SessionColor // Unique color for this session
-	ptyLog     *ptylog.Writer      // PTY output logger for persistence
+	ptyLog       *ptylog.Writer      // PTY output logger for persistence
+	promptStatus PromptStatusValue   // Current prompt detection status (atomic)
 
 	// Scrollback viewing state
-	scrollOffset int // Lines scrolled up from bottom (0 = viewing live terminal)
+	scrollOffset int  // Lines scrolled up from bottom (0 = viewing live terminal)
+	scrollMode   bool // True when user is viewing history (frozen view)
 
 	// Selection state
 	selStart     SelectionPoint
@@ -119,6 +121,11 @@ func (s *SessionState) Colors() render.SessionColor {
 	return s.colors
 }
 
+// PromptStatus returns the current prompt detection status.
+func (s *SessionState) PromptStatus() PromptStatus {
+	return s.promptStatus.Load()
+}
+
 // ScrollOffset returns the current scroll offset (lines up from bottom)
 func (s *SessionState) ScrollOffset() int {
 	return s.scrollOffset
@@ -136,14 +143,32 @@ func (s *SessionState) SetScrollOffset(offset int) {
 	s.scrollOffset = offset
 }
 
-// AdjustScrollOffset adds delta to scroll offset (positive = scroll up/back in history)
+// AdjustScrollOffset adds delta to scroll offset (positive = scroll up/back in history).
+// Automatically enters/exits scroll mode based on resulting offset.
 func (s *SessionState) AdjustScrollOffset(delta int) {
 	s.SetScrollOffset(s.scrollOffset + delta)
+	s.scrollMode = s.scrollOffset > 0
+	s.scrollback.SetFrozen(s.scrollMode)
 }
 
-// ResetScrollOffset snaps back to live view (bottom)
+// ResetScrollOffset snaps back to live view (bottom).
+// Skipped when in scroll mode so the user's view stays frozen.
 func (s *SessionState) ResetScrollOffset() {
+	if !s.scrollMode {
+		s.scrollOffset = 0
+	}
+}
+
+// ScrollToBottom exits scroll mode and snaps to live view.
+func (s *SessionState) ScrollToBottom() {
 	s.scrollOffset = 0
+	s.scrollMode = false
+	s.scrollback.SetFrozen(false)
+}
+
+// InScrollMode returns true when the user is viewing history.
+func (s *SessionState) InScrollMode() bool {
+	return s.scrollMode
 }
 
 // StartSelection begins a new selection at the given cell position
@@ -280,6 +305,9 @@ func NewApp(cfg *config.Config, cfgPath string) *App {
 	// Start background goroutine to track current working directories
 	a.startCWDUpdater()
 
+	// Start background goroutine to detect prompt status
+	a.startPromptDetector()
+
 	return a
 }
 
@@ -295,6 +323,43 @@ func (a *App) startCWDUpdater() {
 			a.updateAllCWDs()
 		}
 	}()
+}
+
+// startPromptDetector starts a background goroutine that checks each session's
+// screen for prompt patterns every 500ms and updates the atomic status field.
+func (a *App) startPromptDetector() {
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			a.updateAllPromptStatuses()
+		}
+	}()
+}
+
+// updateAllPromptStatuses scans each session's screen for prompt patterns.
+func (a *App) updateAllPromptStatuses() {
+	a.mu.RLock()
+	sessions := make([]*SessionState, 0, len(a.sessions))
+	for _, state := range a.sessions {
+		sessions = append(sessions, state)
+	}
+	a.mu.RUnlock()
+
+	needsInvalidate := false
+	for _, state := range sessions {
+		screen := state.Screen()
+		newStatus := detectPromptStatus(screen)
+		old := state.promptStatus.Load()
+		if old != newStatus {
+			state.promptStatus.Store(newStatus)
+			needsInvalidate = true
+		}
+	}
+
+	if needsInvalidate && a.controlWin != nil {
+		a.controlWin.Invalidate()
+	}
 }
 
 // updateAllCWDs polls tmux for the current working directory of each local
@@ -360,11 +425,20 @@ func (a *App) discoverSessions() {
 // Shared between reconnectSession, NewSession, and recreateSession.
 func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 	state.pty.SetOnData(func(data []byte) {
+		oldCount := state.scrollback.Count()
 		state.parser.Parse(data)
+		// In scroll mode, compensate scrollOffset so the view stays on the same
+		// historical lines even as new lines push into the scrollback.
+		if state.scrollMode {
+			newCount := state.scrollback.Count()
+			if delta := newCount - oldCount; delta > 0 {
+				state.scrollOffset += delta
+			}
+		}
 		if state.ptyLog != nil {
 			state.ptyLog.Write(data)
 		}
-		state.ResetScrollOffset() // Snap to bottom on new output
+		state.ResetScrollOffset() // Snap to bottom on new output (no-op in scroll mode)
 		a.invalidateSession(name)
 	})
 

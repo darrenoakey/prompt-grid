@@ -33,6 +33,7 @@ type TerminalWidget struct {
 	focused      bool
 	requestFocus bool // Set by parent to request focus each frame
 	skipKeyboard bool // When true, parent handles keyboard (used in control center)
+	backToBottom bool // Stable click target for "Current" button (Gio event routing)
 }
 
 // NewTerminalWidget creates a new terminal widget
@@ -81,10 +82,20 @@ func (w *TerminalWidget) Layout(gtx layout.Context) layout.Dimensions {
 	// Draw cells
 	w.renderCells(gtx)
 
-	// Draw cursor
-	w.renderCursor(gtx)
+	// Draw cursor (only when viewing live terminal)
+	if w.state.scrollOffset == 0 {
+		w.renderCursor(gtx)
+	}
 
 	stack.Pop()
+
+	// Draw scrollbar and "Current" button over the terminal content
+	if w.state.scrollOffset > 0 {
+		w.renderScrollbar(gtx, width, height, padding)
+	}
+	if w.state.InScrollMode() {
+		w.renderBackToBottom(gtx, width, height)
+	}
 
 	return layout.Dimensions{Size: size}
 }
@@ -492,6 +503,93 @@ func (w *TerminalWidget) renderCursor(gtx layout.Context) {
 	}
 
 	paint.FillShape(gtx.Ops, w.state.colors.Cursor, rect)
+}
+
+func (w *TerminalWidget) renderScrollbar(gtx layout.Context, width, height, padding int) {
+	scrollbackCount := w.state.scrollback.Count()
+	if scrollbackCount == 0 {
+		return
+	}
+
+	_, rows := w.state.Screen().Size()
+	totalLines := scrollbackCount + rows
+	barWidth := 6
+	trackHeight := height - padding*2
+	if trackHeight < 20 {
+		return
+	}
+
+	trackX := width - barWidth - 2
+
+	// Semi-transparent track
+	trackStack := op.Offset(image.Pt(trackX, padding)).Push(gtx.Ops)
+	trackRect := clip.Rect{Max: image.Point{X: barWidth, Y: trackHeight}}.Op()
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 128, G: 128, B: 128, A: 30}, trackRect)
+	trackStack.Pop()
+
+	// Thumb: proportional size, position based on scroll offset
+	thumbFrac := float32(rows) / float32(totalLines)
+	if thumbFrac > 1 {
+		thumbFrac = 1
+	}
+	thumbHeight := int(float32(trackHeight) * thumbFrac)
+	if thumbHeight < 12 {
+		thumbHeight = 12
+	}
+
+	// Position: scrollOffset=0 means at bottom, scrollOffset=scrollbackCount means at top
+	posFrac := float32(w.state.scrollOffset) / float32(scrollbackCount)
+	thumbY := int(float32(trackHeight-thumbHeight) * (1 - posFrac))
+
+	thumbStack := op.Offset(image.Pt(trackX, padding+thumbY)).Push(gtx.Ops)
+	thumbRect := clip.UniformRRect(image.Rectangle{Max: image.Point{X: barWidth, Y: thumbHeight}}, 3).Op(gtx.Ops)
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 200, G: 200, B: 200, A: 160}, thumbRect)
+	thumbStack.Pop()
+}
+
+func (w *TerminalWidget) renderBackToBottom(gtx layout.Context, width, height int) {
+	// "▼ Current" button — bottom-right corner
+	btnW := 90
+	btnH := 24
+	btnX := width - btnW - 12
+	btnY := height - btnH - 12
+
+	btnStack := op.Offset(image.Pt(btnX, btnY)).Push(gtx.Ops)
+
+	// Rounded rect background
+	rr := clip.UniformRRect(image.Rectangle{Max: image.Point{X: btnW, Y: btnH}}, 4)
+	rrOp := rr.Op(gtx.Ops)
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 40, G: 40, B: 40, A: 220}, rrOp)
+
+	// Register click area on stable pointer target
+	event.Op(gtx.Ops, &w.backToBottom)
+
+	// Process click events
+	for {
+		ev, ok := gtx.Event(
+			pointer.Filter{
+				Target: &w.backToBottom,
+				Kinds:  pointer.Press,
+			},
+		)
+		if !ok {
+			break
+		}
+		if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
+			w.state.ScrollToBottom()
+		}
+	}
+
+	// Draw label text
+	labelStack := op.Offset(image.Pt(8, 2)).Push(gtx.Ops)
+	label := material.Label(w.theme, unit.Sp(12), "\u25bc Current")
+	label.Color = color.NRGBA{R: 220, G: 220, B: 220, A: 255}
+	cellGtx := gtx
+	cellGtx.Constraints = layout.Exact(image.Point{X: btnW - 16, Y: btnH - 4})
+	label.Layout(cellGtx)
+	labelStack.Pop()
+
+	btnStack.Pop()
 }
 
 // Focus sets focus on the widget

@@ -147,13 +147,22 @@ func (d *TestDriver) ScrollToTop(sessionName string) {
 	state.SetScrollOffset(state.scrollback.Count())
 }
 
-// ScrollToBottom scrolls to live view
+// ScrollToBottom exits scroll mode and snaps to live view
 func (d *TestDriver) ScrollToBottom(sessionName string) {
 	state := d.app.GetSession(sessionName)
 	if state == nil {
 		return
 	}
-	state.ResetScrollOffset()
+	state.ScrollToBottom()
+}
+
+// IsInScrollMode returns whether the session is in scroll mode (frozen view)
+func (d *TestDriver) IsInScrollMode(sessionName string) bool {
+	state := d.app.GetSession(sessionName)
+	if state == nil {
+		return false
+	}
+	return state.InScrollMode()
 }
 
 // --- State Queries ---

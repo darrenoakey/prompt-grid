@@ -32,7 +32,7 @@ type Parser struct {
 	state        ParserState
 	screen       *Screen
 	scrollback   *Scrollback
-	mainScreen   *Screen // saved main screen while on alternate screen (nil = on main)
+	altScreen    bool    // true when on alternate screen buffer
 	params       []int
 	intermediate string
 	oscString    strings.Builder
@@ -73,13 +73,9 @@ func (p *Parser) Scrollback() *Scrollback {
 	return p.scrollback
 }
 
-// Resize resizes the current screen and, when on the alternate screen, also
-// resizes the saved main screen so it is correct when restored.
+// Resize resizes the current screen.
 func (p *Parser) Resize(cols, rows int) {
 	p.screen.Resize(cols, rows)
-	if p.mainScreen != nil {
-		p.mainScreen.Resize(cols, rows)
-	}
 }
 
 // Parse processes a byte slice through the parser
@@ -503,15 +499,16 @@ func (p *Parser) setMode(set bool) {
 			case 25: // DECTCEM - Cursor visible
 				p.screen.SetCursorVisible(set)
 			case 1049: // Alternate screen buffer (xterm)
-				if set && p.mainScreen == nil {
-					// Enter alternate screen: save main, switch to blank alternate.
-					p.mainScreen = p.screen
+				if set && !p.altScreen {
+					// Enter alternate screen: blank screen, no save.
 					cols, rows := p.screen.Size()
 					p.screen = NewScreen(cols, rows)
-				} else if !set && p.mainScreen != nil {
-					// Leave alternate screen: restore main screen.
-					p.screen = p.mainScreen
-					p.mainScreen = nil
+					p.altScreen = true
+				} else if !set && p.altScreen {
+					// Leave alternate screen: blank screen, no restore.
+					cols, rows := p.screen.Size()
+					p.screen = NewScreen(cols, rows)
+					p.altScreen = false
 				}
 			}
 		}

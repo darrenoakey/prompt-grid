@@ -200,12 +200,12 @@ Rename sessions:
 - **Test timing for tmux initial commands**: Scripts started as tmux initial commands take 500-800ms to run on macOS (shebang parse + bash startup + I/O). Tests must poll with a deadline (e.g., 3s), not use `time.Sleep(500ms)`. Also: use `t.Cleanup()` (not deferred code after `t.Fatalf`) to ensure tmux sessions are killed even when tests fail, preventing cross-test session pollution.
 
 ### Alternate Screen Buffer (?1049h/l)
-- `Parser` has `mainScreen *Screen` field (nil = on main screen, non-nil = on alt screen)
-- `?1049h` (set): saves current screen to `mainScreen`, creates new blank screen for alt
-- `?1049l` (clear): restores `mainScreen`, sets `mainScreen = nil`
-- `Parser.Screen()` always returns `p.screen` (current, whether main or alt)
-- `Parser.Resize()` resizes both `p.screen` AND `p.mainScreen` (if non-nil)
-- **CRITICAL**: tmux sends `?1049h` immediately on `attach-session`. ALL tmux output is on the "alternate screen" (mainScreen != nil). Do NOT suppress scrollback pushes based on `mainScreen != nil` — that breaks all scrollback for every tmux session.
+- `Parser` has `altScreen bool` flag (no screen save/restore — ANSI never flashes historical content)
+- `?1049h` (set): creates a new blank screen, sets `altScreen = true`
+- `?1049l` (clear): creates a new blank screen, sets `altScreen = false`
+- No screen content is saved or restored. The application/tmux redraws immediately after the switch.
+- **Rule**: ANSI processing operates only on the visible screen (rows 0 to height-1). Once content scrolls off screen, it's gone from ANSI's perspective. Only mouse scroll can access history. No ANSI command should ever flash historical content.
+- tmux sends `?1049h` immediately on `attach-session`. Do NOT suppress scrollback pushes based on `altScreen` — that breaks all scrollback for every tmux session.
 - **Always use `state.Screen()` method** (not `state.screen` field directly) to get the correct current screen through the parser delegation chain.
 
 ### Scrollback Viewing

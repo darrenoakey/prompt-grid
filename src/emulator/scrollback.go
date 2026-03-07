@@ -60,6 +60,9 @@ type Scrollback struct {
 	// replay=true suppresses disk writes during ptylog replay
 	replay bool
 
+	// frozen=true suppresses trimming while user is in scroll mode
+	frozen bool
+
 	// View cache — window of disk lines loaded on demand
 	cache      [][]Cell
 	cacheStart int // Absolute line index of cache[0]
@@ -145,6 +148,15 @@ func (s *Scrollback) loadFromFile(f *os.File) int {
 func (s *Scrollback) SetReplayMode(on bool) {
 	s.mu.Lock()
 	s.replay = on
+	s.mu.Unlock()
+}
+
+// SetFrozen enables or disables frozen mode.
+// When frozen, disk trimming is suppressed so old lines aren't deleted
+// while the user is viewing scrollback history.
+func (s *Scrollback) SetFrozen(on bool) {
+	s.mu.Lock()
+	s.frozen = on
 	s.mu.Unlock()
 }
 
@@ -429,9 +441,10 @@ func (s *Scrollback) loadDiskRange(start, end int) [][]Cell {
 }
 
 // checkTrimLocked trims the disk file if it exceeds diskMaxBytes.
+// Skipped when frozen (user is in scroll mode) to avoid deleting lines they're viewing.
 // Caller must hold s.mu.
 func (s *Scrollback) checkTrimLocked() {
-	if s.fbytes < diskMaxBytes {
+	if s.frozen || s.fbytes < diskMaxBytes {
 		return
 	}
 	s.trimDiskLocked()
