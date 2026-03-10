@@ -248,7 +248,7 @@ Rename sessions:
 - **Status bar placement**: Place per-panel status bars inside that panel's Flex column (terminal column), not the outer window Flex, to avoid spanning the sidebar.
 
 ### Discord Bot
-- Auto-reconnects with exponential backoff (1s to 10 min) on disconnect
+- Reconnection: 2-minute grace period for discordgo internal RESUME, then manual Close+Open with 30s-30m exponential backoff. Single reconnect goroutine (guarded by `reconnecting` flag). `cancelReconnectLocked()` closes channel to wake all waiters.
 - Daemon stays running when control window closes (for Discord-only operation)
 - Slash commands: `/term list`, `/term new`, `/term screenshot`, `/term run`, `/term connect <name>`, `/term disconnect <name>`, `/term focus`, `/term close`
 - Token stored in macOS keyring (`prompt-grid/discord_bot_token`)
