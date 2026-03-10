@@ -3,7 +3,57 @@ package discord
 import (
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestStreamerDefaultInactive(t *testing.T) {
+	s := &Streamer{}
+	if s.IsActive() {
+		t.Fatal("new streamer should be inactive by default")
+	}
+}
+
+func TestStreamerActivateDeactivate(t *testing.T) {
+	s := &Streamer{}
+
+	s.Activate()
+	if !s.IsActive() {
+		t.Fatal("streamer should be active after activation")
+	}
+
+	s.Deactivate()
+	if s.IsActive() {
+		t.Fatal("streamer should be inactive after deactivation")
+	}
+}
+
+func TestStreamerLazyTimeout(t *testing.T) {
+	s := &Streamer{
+		running: true,
+	}
+	s.mu.Lock()
+	s.active = true
+	s.lastDiscordMsg = time.Now().Add(-2 * time.Hour) // 2 hours ago
+	s.lastChange = time.Now()
+	s.mu.Unlock()
+
+	// pollOnce should deactivate due to timeout.
+	// captureSnapshot will return nil (no state), but the timeout check
+	// happens before snapshot processing.
+	s.pollOnce()
+
+	if s.IsActive() {
+		t.Fatal("streamer should have been deactivated after 1hr timeout")
+	}
+}
+
+func TestStreamerInactivePollSkips(t *testing.T) {
+	s := &Streamer{
+		running: true,
+	}
+	// Inactive by default — pollOnce should return immediately without panic.
+	s.pollOnce()
+}
 
 func TestChannelNameForSession(t *testing.T) {
 	tests := []struct {

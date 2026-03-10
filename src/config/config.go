@@ -13,9 +13,15 @@ type SessionInfo struct {
 	SSHHost string `json:"ssh_host,omitempty"`
 }
 
+// ClaudeSettings holds Claude-aware behavior settings
+type ClaudeSettings struct {
+	AutoMenu *bool `json:"auto_menu,omitempty"` // Auto-answer numbered menus (default: true)
+}
+
 // Config holds application configuration
 type Config struct {
 	Discord             DiscordConfig          `json:"discord"`
+	Claude              ClaudeSettings         `json:"claude,omitempty"`
 	SessionColors       map[string]int         `json:"session_colors,omitempty"`
 	WindowSizes         map[string][2]int      `json:"window_sizes,omitempty"`
 	Sessions            map[string]SessionInfo `json:"sessions,omitempty"`
@@ -238,6 +244,19 @@ func (c *Config) GetControlCenterPos() (int, int, bool) {
 // SetControlCenterPos saves the control center window position
 func (c *Config) SetControlCenterPos(x, y int) {
 	c.ControlCenterPos = [2]int{x, y}
+}
+
+// GetClaudeAutoMenu returns whether auto-menu is enabled (default: true)
+func (c *Config) GetClaudeAutoMenu() bool {
+	if c.Claude.AutoMenu == nil {
+		return true
+	}
+	return *c.Claude.AutoMenu
+}
+
+// SetClaudeAutoMenu sets the auto-menu toggle
+func (c *Config) SetClaudeAutoMenu(enabled bool) {
+	c.Claude.AutoMenu = &enabled
 }
 
 // LoadDefault loads configuration from the default path

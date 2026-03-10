@@ -61,6 +61,17 @@ type ControlWindow struct {
 	searchEditor     widget.Editor             // Search input
 	searchQuery      string                    // Current search query
 	newSessionBtn    *sessionButton            // "NEW SESSION" button target
+	settingsMenu     *settingsMenuState        // Settings gear dropdown
+	settingsBtn      *settingsButton           // Persistent target for gear icon
+}
+
+// settingsButton is a persistent target for the settings gear icon
+type settingsButton struct{}
+
+// settingsMenuState tracks the settings dropdown
+type settingsMenuState struct {
+	visible  bool
+	position image.Point
 }
 
 // sessionButton is a persistent target for the NEW SESSION button
@@ -121,6 +132,8 @@ func NewControlWindow(application *App) *ControlWindow {
 		renameState:     &renameState{},
 		newSessionState: &newSessionState{},
 		newSessionBtn:   &sessionButton{},
+		settingsMenu:    &settingsMenuState{},
+		settingsBtn:     &settingsButton{},
 	}
 
 	// Load embedded logo
@@ -353,6 +366,33 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		areaStack.Pop()
 	}
 
+	// Handle clicks to dismiss settings menu
+	if w.settingsMenu.visible && !w.contextMenu.visible {
+		areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
+		event.Op(gtx.Ops, w.menuOverlay)
+		for {
+			ev, ok := gtx.Event(
+				pointer.Filter{Target: w.menuOverlay, Kinds: pointer.Press},
+			)
+			if !ok {
+				break
+			}
+			if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
+				// Check if click is inside settings dropdown
+				pos := w.settingsMenu.position
+				menuWidth := 260
+				menuHeight := 32
+				clickX, clickY := int(e.Position.X), int(e.Position.Y)
+				inMenu := clickX >= pos.X && clickX <= pos.X+menuWidth &&
+					clickY >= pos.Y && clickY <= pos.Y+menuHeight
+				if !inMenu {
+					w.settingsMenu.visible = false
+				}
+			}
+		}
+		areaStack.Pop()
+	}
+
 	// New layout: [Header] over [Sidebar | Sep | (Terminal over StatusBar)]
 	layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -432,6 +472,12 @@ func (w *ControlWindow) layoutHeader(gtx layout.Context) layout.Dimensions {
 	w.layoutSearchBar(searchGtx)
 	searchStack.Pop()
 
+	// Settings gear button: left of Discord status
+	gearSize := 24
+	gearX := gtx.Constraints.Max.X - 200 // Left of Discord status area
+	gearY := (headerHeight - gearSize) / 2
+	w.layoutSettingsButton(gtx, gearX, gearY, gearSize)
+
 	// Discord status: anchored right, centered vertically
 	statusGtx := gtx
 	statusGtx.Constraints.Max = image.Point{X: 200, Y: headerHeight}
@@ -447,6 +493,11 @@ func (w *ControlWindow) layoutHeader(gtx layout.Context) layout.Dimensions {
 	statusStack := op.Offset(image.Pt(statusX, statusY)).Push(gtx.Ops)
 	w.layoutDiscordStatusHeader(statusGtx)
 	statusStack.Pop()
+
+	// Settings dropdown (rendered after header elements so it's on top)
+	if w.settingsMenu.visible {
+		w.layoutSettingsDropdown(gtx)
+	}
 
 	return layout.Dimensions{Size: image.Point{X: gtx.Constraints.Max.X, Y: headerHeight}}
 }
@@ -531,6 +582,96 @@ func (w *ControlWindow) layoutDiscordStatusHeader(gtx layout.Context) layout.Dim
 			return layout.Dimensions{Size: image.Point{X: d.Size.X + 8, Y: d.Size.Y}}
 		}),
 	)
+}
+
+func (w *ControlWindow) layoutSettingsButton(gtx layout.Context, x, y, size int) {
+	stack := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
+
+	// Hit area
+	area := clip.Rect{Max: image.Point{X: size, Y: size}}.Push(gtx.Ops)
+	event.Op(gtx.Ops, w.settingsBtn)
+	for {
+		ev, ok := gtx.Event(
+			pointer.Filter{Target: w.settingsBtn, Kinds: pointer.Press},
+		)
+		if !ok {
+			break
+		}
+		if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
+			w.settingsMenu.visible = !w.settingsMenu.visible
+			w.settingsMenu.position = image.Pt(x, headerHeight)
+		}
+	}
+	area.Pop()
+
+	// Render gear icon as "⚙" text
+	label := material.Label(w.theme, unit.Sp(18), "⚙")
+	label.Color = color.NRGBA{R: 160, G: 160, B: 160, A: 255}
+	label.Layout(gtx)
+
+	stack.Pop()
+}
+
+func (w *ControlWindow) layoutSettingsDropdown(gtx layout.Context) {
+	itemHeight := 32
+	menuWidth := 260
+	menuHeight := itemHeight // One item for now
+
+	pos := w.settingsMenu.position
+
+	// Background
+	bgStack := op.Offset(image.Pt(pos.X, pos.Y)).Push(gtx.Ops)
+	bgRect := clip.Rect{Max: image.Point{X: menuWidth, Y: menuHeight}}.Op()
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 36, G: 36, B: 36, A: 255}, bgRect)
+
+	// Border
+	borderColor := color.NRGBA{R: 64, G: 64, B: 64, A: 255}
+	for _, edge := range []clip.Rect{
+		{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: menuWidth, Y: 1}},
+		{Min: image.Point{X: 0, Y: menuHeight - 1}, Max: image.Point{X: menuWidth, Y: menuHeight}},
+		{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 1, Y: menuHeight}},
+		{Min: image.Point{X: menuWidth - 1, Y: 0}, Max: image.Point{X: menuWidth, Y: menuHeight}},
+	} {
+		paint.FillShape(gtx.Ops, borderColor, edge.Op())
+	}
+
+	// Toggle item: "Auto-answer Claude menus"
+	autoMenu := w.app.config != nil && w.app.config.GetClaudeAutoMenu()
+	indicator := "○"
+	if autoMenu {
+		indicator = "✓"
+	}
+	itemLabel := indicator + "  Auto-answer Claude menus"
+
+	// Hit area for the item
+	itemArea := clip.Rect{Max: image.Point{X: menuWidth, Y: itemHeight}}.Push(gtx.Ops)
+	// Use settingsMenu as click target (reusing struct pointer as unique target)
+	event.Op(gtx.Ops, w.settingsMenu)
+	for {
+		ev, ok := gtx.Event(
+			pointer.Filter{Target: w.settingsMenu, Kinds: pointer.Press},
+		)
+		if !ok {
+			break
+		}
+		if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
+			if w.app.config != nil {
+				w.app.config.SetClaudeAutoMenu(!autoMenu)
+				w.app.saveConfig()
+			}
+			w.settingsMenu.visible = false
+		}
+	}
+	itemArea.Pop()
+
+	// Render text
+	textStack := op.Offset(image.Pt(12, 7)).Push(gtx.Ops)
+	label := material.Label(w.theme, unit.Sp(13), itemLabel)
+	label.Color = color.NRGBA{R: 224, G: 224, B: 224, A: 255}
+	label.Layout(gtx)
+	textStack.Pop()
+
+	bgStack.Pop()
 }
 
 func (w *ControlWindow) layoutSidebar(gtx layout.Context) layout.Dimensions {
@@ -748,6 +889,7 @@ func (w *ControlWindow) layoutSessionItem(gtx layout.Context, tab *tabState, off
 						w.focusTerminal = true
 						w.lastTermSize = image.Point{} // Force resize for new session
 						w.contextMenu.visible = false  // Close context menu on left click
+						w.settingsMenu.visible = false
 					}
 				}
 			}

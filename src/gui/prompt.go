@@ -1,11 +1,14 @@
 package gui
 
 import (
+	"regexp"
 	"strings"
 	"sync/atomic"
 
 	"prompt-grid/src/emulator"
 )
+
+var numberedItemRe = regexp.MustCompile(`^\s*\d+\.\s+`)
 
 // PromptStatus indicates what kind of prompt (if any) the session is at.
 type PromptStatus int32
@@ -158,6 +161,62 @@ func hasClaudeIndicators(screen *emulator.Screen, cursorY, rows int) bool {
 	}
 
 	return false
+}
+
+// detectClaudeMenu checks if the screen is showing a numbered menu from Claude
+// (e.g., permission prompts like "1. Yes  2. No"). Returns true when at least
+// two consecutive numbered lines are visible near the cursor and Claude
+// indicators are present above.
+func detectClaudeMenu(screen *emulator.Screen) bool {
+	if screen == nil {
+		return false
+	}
+
+	cursor := screen.Cursor()
+	_, rows := screen.Size()
+
+	// Scan lines near cursor (up to 15 lines above) for consecutive numbered items
+	startScan := cursor.Y
+	if startScan >= rows {
+		startScan = rows - 1
+	}
+
+	// Walk upward from cursor to find numbered block
+	consecutiveNumbered := 0
+	firstNumberedLine := -1
+	for y := startScan; y >= 0 && y > startScan-15; y-- {
+		line := getLineText(screen, y)
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			if consecutiveNumbered >= 2 {
+				break // Found a block, stop
+			}
+			consecutiveNumbered = 0
+			continue
+		}
+		if numberedItemRe.MatchString(trimmed) {
+			consecutiveNumbered++
+			firstNumberedLine = y
+		} else {
+			if consecutiveNumbered >= 2 {
+				break
+			}
+			consecutiveNumbered = 0
+		}
+	}
+
+	if consecutiveNumbered < 2 || firstNumberedLine < 0 {
+		return false
+	}
+
+	// Cursor should be on or just below the numbered block (within 3 lines)
+	lastNumberedLine := firstNumberedLine + consecutiveNumbered - 1
+	if cursor.Y < firstNumberedLine || cursor.Y > lastNumberedLine+3 {
+		return false
+	}
+
+	// Require Claude indicators above the numbered block
+	return hasClaudeIndicators(screen, firstNumberedLine, rows)
 }
 
 // PromptStatusValue wraps atomic.Int32 for type-safe PromptStatus access.

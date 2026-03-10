@@ -216,6 +216,7 @@ func (b *Bot) handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	if m.Author.Bot {
 		return
 	}
+
 	if m.GuildID != b.cfg.ServerID {
 		return
 	}
@@ -227,9 +228,30 @@ func (b *Bot) handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	if sessionName == "" {
 		return
 	}
-	if m.Content == "" {
+
+	content := strings.TrimSpace(m.Content)
+
+	// Handle special commands that shouldn't be forwarded to tmux.
+	switch strings.ToLower(content) {
+	case "connect", "":
+		// Activate streaming and send the current screen.
+		b.activateAndSendScreen(sessionName)
+		return
+	case "disconnect":
+		b.mu.RLock()
+		streamer := b.streamers[sessionName]
+		b.mu.RUnlock()
+		if streamer != nil && streamer.IsActive() {
+			streamer.Deactivate()
+			_, _ = s.ChannelMessageSend(m.ChannelID, "Streaming stopped.")
+		} else {
+			_, _ = s.ChannelMessageSend(m.ChannelID, "Streaming is not active.")
+		}
 		return
 	}
+
+	// Any other message activates streaming and forwards input to the session.
+	b.activateStreamer(sessionName)
 
 	state := b.app.GetSession(sessionName)
 	if state == nil {
@@ -356,7 +378,7 @@ func (b *Bot) registerCommands() {
 				},
 				{
 					Name:        "connect",
-					Description: "Ensure a session is connected to its Discord channel",
+					Description: "Start streaming output for a session (1hr timeout)",
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
 					Options: []*discordgo.ApplicationCommandOption{
 						{
@@ -369,8 +391,16 @@ func (b *Bot) registerCommands() {
 				},
 				{
 					Name:        "disconnect",
-					Description: "Report current always-on streaming mode",
+					Description: "Stop streaming output for a session",
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Options: []*discordgo.ApplicationCommandOption{
+						{
+							Name:        "name",
+							Description: "Session name",
+							Type:        discordgo.ApplicationCommandOptionString,
+							Required:    true,
+						},
+					},
 				},
 				{
 					Name:        "focus",
@@ -475,16 +505,22 @@ func (b *Bot) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 		handler.HandleList()
 	case "screenshot", "show":
 		discordLog.Printf("Handling screenshot command")
+		if name := getOption(subCmd.Options, "name"); name != "" {
+			b.activateStreamer(name)
+		}
 		handler.HandleScreenshot(subCmd.Options)
 	case "run":
 		discordLog.Printf("Handling run command")
+		if name := getOption(subCmd.Options, "name"); name != "" {
+			b.activateStreamer(name)
+		}
 		handler.HandleRun(subCmd.Options)
 	case "connect":
 		discordLog.Printf("Handling connect command")
 		handler.HandleConnect(subCmd.Options)
 	case "disconnect":
 		discordLog.Printf("Handling disconnect command")
-		handler.HandleDisconnect()
+		handler.HandleDisconnect(subCmd.Options)
 	case "focus":
 		discordLog.Printf("Handling focus command")
 		handler.HandleFocus(subCmd.Options)
@@ -601,16 +637,25 @@ func (b *Bot) syncSessionChannelsAndStreams() {
 	activeSessions := make(map[string]struct{}, len(sessionNames))
 	for _, name := range sessionNames {
 		activeSessions[name] = struct{}{}
+	}
+
+	// Clean up orphan channels FIRST to free slots before creating new ones
+	// (Discord limits categories to 50 channels).
+	b.cleanupRemovedSessions(activeSessions)
+	b.cleanupOrphanChannels(activeSessions, categoryID)
+
+	// Now create/reuse channels for active sessions.
+	created := 0
+	for _, name := range sessionNames {
 		channelID, ensureErr := b.ensureSessionChannel(name, categoryID)
 		if ensureErr != nil {
 			discordLog.Printf("Failed to ensure channel for session %q: %v", name, ensureErr)
 			continue
 		}
 		b.ensureStreamer(name, channelID)
+		created++
 	}
-
-	b.cleanupRemovedSessions(activeSessions)
-	b.cleanupOrphanChannels(activeSessions, categoryID)
+	discordLog.Printf("Session sync complete: %d/%d channels ready", created, len(sessionNames))
 }
 
 func (b *Bot) cleanupRemovedSessions(activeSessions map[string]struct{}) {
@@ -635,16 +680,29 @@ func (b *Bot) cleanupOrphanChannels(activeSessions map[string]struct{}, category
 		return
 	}
 
+	// Build a set of expected channel names for active sessions so we can
+	// identify orphans even when the sessionChannels map is empty (startup).
+	expectedNames := make(map[string]struct{}, len(activeSessions))
+	for sessionName := range activeSessions {
+		expectedNames[channelNameForSession(sessionName)] = struct{}{}
+	}
+
 	for _, ch := range guildChannels {
 		if ch.Type != discordgo.ChannelTypeGuildText || ch.ParentID != categoryID {
 			continue
 		}
 
+		// Keep if this channel is mapped to an active session.
 		sessionName := b.sessionNameForChannel(ch.ID)
 		if sessionName != "" {
 			if _, ok := activeSessions[sessionName]; ok {
 				continue
 			}
+		}
+
+		// Keep if the channel name matches any active session's expected name.
+		if _, ok := expectedNames[ch.Name]; ok {
+			continue
 		}
 
 		if _, err := b.session.ChannelDelete(ch.ID); err != nil {
@@ -770,6 +828,39 @@ func (b *Bot) replaceSessionName(oldName, newName string) string {
 		b.streamers[newName] = streamer
 	}
 	return channelID
+}
+
+// activateAndSendScreen activates a streamer and immediately sends the current
+// screen content, so the user gets instant feedback on "connect".
+func (b *Bot) activateAndSendScreen(sessionName string) {
+	b.mu.RLock()
+	streamer := b.streamers[sessionName]
+	b.mu.RUnlock()
+	if streamer == nil {
+		return
+	}
+	if !streamer.IsActive() {
+		streamer.Activate()
+	} else {
+		streamer.TouchDiscordActivity()
+	}
+	go streamer.SendCurrentScreen()
+}
+
+// activateStreamer activates streaming for a session (if its streamer exists).
+// Called when a Discord user interacts with the session's channel.
+func (b *Bot) activateStreamer(sessionName string) {
+	b.mu.RLock()
+	streamer := b.streamers[sessionName]
+	b.mu.RUnlock()
+	if streamer == nil {
+		return
+	}
+	if !streamer.IsActive() {
+		streamer.Activate()
+	} else {
+		streamer.TouchDiscordActivity()
+	}
 }
 
 func (b *Bot) removeStreamer(sessionName string) {

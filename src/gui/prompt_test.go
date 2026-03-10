@@ -187,6 +187,60 @@ func TestGetLineText(t *testing.T) {
 	}
 }
 
+func TestDetectClaudeMenu_Basic(t *testing.T) {
+	screen := emulator.NewScreen(120, 24)
+	// Claude indicator above
+	writeString(screen, 0, 5, "  Cost: $0.12  Duration: 45s")
+	// Numbered menu
+	writeString(screen, 0, 8, "  1. Yes, clear context and bypass permissions")
+	writeString(screen, 0, 9, "  2. Yes, and bypass permissions")
+	writeString(screen, 0, 10, "  3. Yes, manually approve edits")
+	// Cursor on line below menu (Claude waiting for input)
+	screen.SetCursor(0, 11)
+	if !detectClaudeMenu(screen) {
+		t.Fatal("should detect Claude numbered menu")
+	}
+}
+
+func TestDetectClaudeMenu_NilScreen(t *testing.T) {
+	if detectClaudeMenu(nil) {
+		t.Fatal("nil screen should return false")
+	}
+}
+
+func TestDetectClaudeMenu_NoClaudeIndicators(t *testing.T) {
+	screen := emulator.NewScreen(120, 24)
+	// Numbered items but no Claude indicators
+	writeString(screen, 0, 8, "  1. First item")
+	writeString(screen, 0, 9, "  2. Second item")
+	screen.SetCursor(0, 10)
+	if detectClaudeMenu(screen) {
+		t.Fatal("should not detect menu without Claude indicators")
+	}
+}
+
+func TestDetectClaudeMenu_SingleItem(t *testing.T) {
+	screen := emulator.NewScreen(120, 24)
+	writeString(screen, 0, 5, "  Cost: $0.05")
+	writeString(screen, 0, 8, "  1. Only one item")
+	screen.SetCursor(0, 9)
+	if detectClaudeMenu(screen) {
+		t.Fatal("should not detect menu with only one numbered item")
+	}
+}
+
+func TestDetectClaudeMenu_CursorTooFar(t *testing.T) {
+	screen := emulator.NewScreen(120, 24)
+	writeString(screen, 0, 5, "  Cost: $0.05")
+	writeString(screen, 0, 8, "  1. First item")
+	writeString(screen, 0, 9, "  2. Second item")
+	// Cursor way below the numbered block (more than 3 lines)
+	screen.SetCursor(0, 20)
+	if detectClaudeMenu(screen) {
+		t.Fatal("should not detect menu when cursor is far below numbered block")
+	}
+}
+
 func TestDetectPromptStatus_ShellGT(t *testing.T) {
 	// Shell prompt ending with ">"
 	screen := emulator.NewScreen(80, 24)

@@ -13,6 +13,7 @@ const (
 	streamPollInterval = 250 * time.Millisecond
 	idleTimeout        = 10 * time.Second
 	heartbeatInterval  = 60 * time.Second
+	activationTimeout  = 1 * time.Hour
 )
 
 // Streamer streams debounced terminal text diffs to Discord.
@@ -26,6 +27,9 @@ type Streamer struct {
 	running   bool
 	stopCh    chan struct{}
 	primed    bool
+
+	active         bool      // whether streaming is turned on (off by default)
+	lastDiscordMsg time.Time // last message received from Discord in this channel
 
 	lastObserved    []string
 	lastSent        []string
@@ -76,6 +80,55 @@ func (s *Streamer) Stop() {
 	close(s.stopCh)
 }
 
+// Activate turns on streaming for this channel. Resets the priming phase so
+// the current screen is sent fresh, and records the activation time for the
+// 1-hour inactivity timeout.
+func (s *Streamer) Activate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	s.active = true
+	s.lastDiscordMsg = now
+	// Reset priming so the next poll captures and sends the current screen.
+	s.primed = false
+	s.lastChange = now
+	s.lastObserved = nil
+	s.lastSent = nil
+	s.dirty = false
+	name := ""
+	if s.state != nil {
+		name = s.state.Name()
+	}
+	discordLog.Printf("Streamer activated for %q", name)
+}
+
+// Deactivate turns off streaming for this channel.
+func (s *Streamer) Deactivate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.active = false
+	name := ""
+	if s.state != nil {
+		name = s.state.Name()
+	}
+	discordLog.Printf("Streamer deactivated for %q", name)
+}
+
+// IsActive returns whether streaming is currently on.
+func (s *Streamer) IsActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active
+}
+
+// TouchDiscordActivity records that a Discord user interacted with this
+// channel, extending the activation window.
+func (s *Streamer) TouchDiscordActivity() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastDiscordMsg = time.Now()
+}
+
 // SetChannelID updates the destination Discord channel.
 func (s *Streamer) SetChannelID(channelID string) {
 	s.mu.Lock()
@@ -102,11 +155,32 @@ func (s *Streamer) loop() {
 }
 
 func (s *Streamer) pollOnce() {
-	snapshot := s.captureSnapshot()
 	now := time.Now()
 
+	// Check active/running state before doing any work.
 	s.mu.Lock()
-	if !s.running {
+	if !s.running || !s.active {
+		s.mu.Unlock()
+		return
+	}
+
+	// Lazy 1-hour timeout: if no Discord messages for activationTimeout, deactivate.
+	if !s.lastDiscordMsg.IsZero() && now.Sub(s.lastDiscordMsg) >= activationTimeout {
+		s.active = false
+		s.mu.Unlock()
+		name := ""
+		if s.state != nil {
+			name = s.state.Name()
+		}
+		discordLog.Printf("Streamer auto-deactivated for %q (1hr inactivity)", name)
+		return
+	}
+	s.mu.Unlock()
+
+	snapshot := s.captureSnapshot()
+
+	s.mu.Lock()
+	if !s.running || !s.active {
 		s.mu.Unlock()
 		return
 	}
@@ -187,7 +261,7 @@ func (s *Streamer) sendSnapshot(channelID string, snapshot []string) {
 
 func (s *Streamer) sendHeartbeatIfNeeded() {
 	s.mu.Lock()
-	if !s.running {
+	if !s.running || !s.active {
 		s.mu.Unlock()
 		return
 	}
@@ -216,6 +290,36 @@ func (s *Streamer) sendHeartbeatIfNeeded() {
 	s.mu.Lock()
 	s.lastHeartbeat = now
 	s.mu.Unlock()
+}
+
+// SendCurrentScreen captures the current screen and sends it to Discord
+// immediately, bypassing the debounce/diff logic. Used on activation so the
+// user sees the current state right away.
+func (s *Streamer) SendCurrentScreen() {
+	snapshot := s.captureSnapshot()
+	if len(snapshot) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	channelID := s.channelID
+	// Set lastSent so subsequent diffs work correctly.
+	s.lastSent = cloneLines(snapshot)
+	s.lastObserved = cloneLines(snapshot)
+	s.primed = true
+	s.dirty = false
+	now := time.Now()
+	s.lastContentSent = now
+	s.lastHeartbeat = now
+	s.mu.Unlock()
+
+	if err := s.bot.sendLines(channelID, snapshot); err != nil {
+		name := ""
+		if s.state != nil {
+			name = s.state.Name()
+		}
+		discordLog.Printf("Failed sending initial screen for %q: %v", name, err)
+	}
 }
 
 func (s *Streamer) captureSnapshot() []string {

@@ -74,6 +74,9 @@ type SessionState struct {
 	scrollOffset int  // Lines scrolled up from bottom (0 = viewing live terminal)
 	scrollMode   bool // True when user is viewing history (frozen view)
 
+	// Auto-menu cooldown
+	lastAutoMenuTime time.Time // Last time auto-menu sent "1" to this session
+
 	// Selection state
 	selStart     SelectionPoint
 	selEnd       SelectionPoint
@@ -340,20 +343,34 @@ func (a *App) startPromptDetector() {
 // updateAllPromptStatuses scans each session's screen for prompt patterns.
 func (a *App) updateAllPromptStatuses() {
 	a.mu.RLock()
-	sessions := make([]*SessionState, 0, len(a.sessions))
-	for _, state := range a.sessions {
-		sessions = append(sessions, state)
+	type sessionRef struct {
+		state *SessionState
+		name  string
 	}
+	sessions := make([]sessionRef, 0, len(a.sessions))
+	for name, state := range a.sessions {
+		sessions = append(sessions, sessionRef{state: state, name: name})
+	}
+	autoMenu := a.config != nil && a.config.GetClaudeAutoMenu()
 	a.mu.RUnlock()
 
 	needsInvalidate := false
-	for _, state := range sessions {
-		screen := state.Screen()
+	now := time.Now()
+	for _, ref := range sessions {
+		screen := ref.state.Screen()
 		newStatus := detectPromptStatus(screen)
-		old := state.promptStatus.Load()
+		old := ref.state.promptStatus.Load()
 		if old != newStatus {
-			state.promptStatus.Store(newStatus)
+			ref.state.promptStatus.Store(newStatus)
 			needsInvalidate = true
+		}
+
+		// Auto-answer Claude numbered menus
+		if autoMenu && now.Sub(ref.state.lastAutoMenuTime) > 3*time.Second {
+			if detectClaudeMenu(screen) {
+				ref.state.lastAutoMenuTime = now
+				tmux.SendKeys(ref.name, "1", "Enter")
+			}
 		}
 	}
 

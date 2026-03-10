@@ -302,12 +302,30 @@ func (h *CommandHandler) HandleConnect(options []*discordgo.ApplicationCommandIn
 		return
 	}
 
-	h.respond(fmt.Sprintf("Session **%s** is streaming in <#%s>.", name, channelID), false)
+	// Activate streaming for this session.
+	h.bot.activateStreamer(name)
+
+	h.respond(fmt.Sprintf("Session **%s** is now streaming in <#%s> (1hr timeout).", name, channelID), false)
 }
 
 // HandleDisconnect handles the /term disconnect command
-func (h *CommandHandler) HandleDisconnect() {
-	h.respond("Streaming is automatic per session. Close a session to stop its stream.", true)
+func (h *CommandHandler) HandleDisconnect(options []*discordgo.ApplicationCommandInteractionDataOption) {
+	name := getOption(options, "name")
+	if name == "" {
+		h.respond("Session name is required.", true)
+		return
+	}
+
+	h.bot.mu.RLock()
+	streamer := h.bot.streamers[name]
+	h.bot.mu.RUnlock()
+
+	if streamer != nil && streamer.IsActive() {
+		streamer.Deactivate()
+		h.respond(fmt.Sprintf("Stopped streaming for **%s**.", name), false)
+	} else {
+		h.respond(fmt.Sprintf("Streaming is not active for **%s**.", name), true)
+	}
 }
 
 // HandleFocus handles the /term focus command
