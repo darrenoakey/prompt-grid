@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	streamPollInterval = 250 * time.Millisecond
+	streamPollInterval = 2 * time.Second
 	idleTimeout        = 10 * time.Second
 	heartbeatInterval  = 60 * time.Second
 	activationTimeout  = 1 * time.Hour

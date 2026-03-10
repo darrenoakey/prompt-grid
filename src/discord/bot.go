@@ -20,9 +20,12 @@ import (
 )
 
 const (
-	// Reconnect backoff settings
-	minReconnectDelay = 1 * time.Second
-	maxReconnectDelay = 10 * time.Minute
+	// Manual reconnection is a LAST RESORT. discordgo handles RESUME
+	// internally. We only do a manual Close+Open if the library hasn't
+	// reconnected on its own after reconnectGracePeriod.
+	reconnectGracePeriod = 2 * time.Minute
+	minReconnectDelay    = 30 * time.Second
+	maxReconnectDelay    = 30 * time.Minute
 
 	defaultCategoryName = "claude sessions"
 )
@@ -56,8 +59,9 @@ type Bot struct {
 	isConnected     bool
 	slashCommands   []*discordgo.ApplicationCommand
 	stopReconnect   chan struct{}
-	reconnectDelay  time.Duration
 	shouldReconnect bool
+	reconnecting    bool      // true when a reconnect goroutine is running
+	lastDisconnect  time.Time // when disconnect was first detected
 
 	categoryID      string
 	sessionChannels map[string]string // session name -> discord channel ID
@@ -84,7 +88,6 @@ func NewBot(cfg *config.DiscordConfig, app *gui.App) (*Bot, error) {
 		cfg:             cfg,
 		app:             app,
 		stopReconnect:   make(chan struct{}),
-		reconnectDelay:  minReconnectDelay,
 		shouldReconnect: true,
 		sessionChannels: make(map[string]string),
 		channelSessions: make(map[string]string),
@@ -128,16 +131,10 @@ func (b *Bot) Connect() error {
 
 // Disconnect disconnects from Discord and stops reconnection attempts.
 func (b *Bot) Disconnect() error {
-	// Stop reconnection attempts first
 	b.mu.Lock()
 	b.shouldReconnect = false
+	b.cancelReconnectLocked()
 	b.mu.Unlock()
-
-	// Signal reconnect goroutine to stop
-	select {
-	case b.stopReconnect <- struct{}{}:
-	default:
-	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -166,14 +163,14 @@ func (b *Bot) Disconnect() error {
 }
 
 func (b *Bot) handleReady(s *discordgo.Session, r *discordgo.Ready) {
-	discordLog.Printf("Discord bot logged in as: %v#%v", s.State.User.Username, s.State.User.Discriminator)
+	discordLog.Printf("Discord bot connected as: %v#%v", s.State.User.Username, s.State.User.Discriminator)
 
 	b.mu.Lock()
 	b.isConnected = true
-	b.reconnectDelay = minReconnectDelay // Reset backoff on successful connection
+	b.lastDisconnect = time.Time{}
+	b.cancelReconnectLocked()
 	b.mu.Unlock()
 
-	// Register slash commands
 	b.registerCommands()
 
 	go b.syncSessionChannelsAndStreams()
@@ -185,14 +182,21 @@ func (b *Bot) handleResumed(s *discordgo.Session, r *discordgo.Resumed) {
 	discordLog.Printf("Discord session resumed")
 	b.mu.Lock()
 	b.isConnected = true
-	b.reconnectDelay = minReconnectDelay
+	b.lastDisconnect = time.Time{}
+	b.cancelReconnectLocked()
 	b.mu.Unlock()
+}
 
-	// Signal reconnect goroutine to stop (session is already up)
+// cancelReconnectLocked closes the stopReconnect channel to wake any waiting
+// reconnect goroutine, then replaces it with a fresh channel. Caller holds b.mu.
+func (b *Bot) cancelReconnectLocked() {
 	select {
-	case b.stopReconnect <- struct{}{}:
+	case <-b.stopReconnect:
+		// Already closed.
 	default:
+		close(b.stopReconnect)
 	}
+	b.stopReconnect = make(chan struct{})
 }
 
 func (b *Bot) handleDisconnect(s *discordgo.Session, d *discordgo.Disconnect) {
@@ -200,11 +204,20 @@ func (b *Bot) handleDisconnect(s *discordgo.Session, d *discordgo.Disconnect) {
 	wasConnected := b.isConnected
 	b.isConnected = false
 	shouldReconnect := b.shouldReconnect
+	alreadyReconnecting := b.reconnecting
+	if b.lastDisconnect.IsZero() {
+		b.lastDisconnect = time.Now()
+	}
 	b.mu.Unlock()
 
-	discordLog.Printf("Discord disconnected (was connected: %v)", wasConnected)
+	// Only log once per disconnect event group (when we were previously connected).
+	if wasConnected {
+		discordLog.Printf("Discord disconnected")
+	}
 
-	if shouldReconnect {
+	// Let discordgo try its internal RESUME first. Only start manual
+	// reconnection if no goroutine is already running.
+	if shouldReconnect && !alreadyReconnecting {
 		go b.reconnect()
 	}
 }
@@ -281,15 +294,60 @@ func discordContentToInputLines(content string) []string {
 	return lines
 }
 
-// reconnect attempts to reconnect with exponential backoff.
+// reconnect waits for discordgo's internal reconnection to succeed, then
+// falls back to manual Close+Open with exponential backoff.
+// Only one goroutine runs this at a time (guarded by b.reconnecting).
 func (b *Bot) reconnect() {
 	b.mu.Lock()
-	delay := b.reconnectDelay
+	if b.reconnecting {
+		b.mu.Unlock()
+		return
+	}
+	b.reconnecting = true
+	b.stopReconnect = make(chan struct{})
+	stopCh := b.stopReconnect
 	b.mu.Unlock()
 
+	defer func() {
+		b.mu.Lock()
+		b.reconnecting = false
+		b.mu.Unlock()
+	}()
+
+	// Phase 1: Wait for the grace period. discordgo's internal RESUME may
+	// reconnect on its own — give it time before we intervene.
+	discordLog.Printf("Disconnected — waiting %v for library auto-reconnect", reconnectGracePeriod)
+	select {
+	case <-stopCh:
+		discordLog.Printf("Reconnection cancelled (library reconnected)")
+		return
+	case <-time.After(reconnectGracePeriod):
+	}
+
+	// Check if we're already back.
+	b.mu.RLock()
+	if b.isConnected || !b.shouldReconnect {
+		b.mu.RUnlock()
+		return
+	}
+	b.mu.RUnlock()
+
+	// Phase 2: Manual reconnection with exponential backoff.
+	delay := minReconnectDelay
 	for {
+		discordLog.Printf("Attempting manual reconnect...")
+
+		_ = b.session.Close()
+
+		if err := b.session.Open(); err != nil {
+			discordLog.Printf("Reconnection failed: %v — will retry in %v", err, delay)
+		} else {
+			discordLog.Printf("Reconnected successfully")
+			return
+		}
+
 		select {
-		case <-b.stopReconnect:
+		case <-stopCh:
 			discordLog.Printf("Reconnection cancelled")
 			return
 		case <-time.After(delay):
@@ -298,36 +356,14 @@ func (b *Bot) reconnect() {
 		b.mu.RLock()
 		shouldReconnect := b.shouldReconnect
 		b.mu.RUnlock()
-
 		if !shouldReconnect {
 			return
 		}
 
-		discordLog.Printf("Attempting to reconnect (delay was %v)...", delay)
-
-		// Close first to clear any stale WebSocket state (discordgo may have
-		// already reconnected internally via RESUME, leaving wsConn non-nil).
-		// Ignore close error — the connection may already be gone.
-		_ = b.session.Close()
-
-		if err := b.session.Open(); err != nil {
-			discordLog.Printf("Reconnection failed: %v", err)
-
-			// Increase backoff
-			b.mu.Lock()
-			b.reconnectDelay = b.reconnectDelay * 2
-			if b.reconnectDelay > maxReconnectDelay {
-				b.reconnectDelay = maxReconnectDelay
-			}
-			delay = b.reconnectDelay
-			b.mu.Unlock()
-
-			discordLog.Printf("Will retry in %v", delay)
-			continue
+		delay = delay * 2
+		if delay > maxReconnectDelay {
+			delay = maxReconnectDelay
 		}
-
-		discordLog.Printf("Reconnected successfully")
-		return
 	}
 }
 
