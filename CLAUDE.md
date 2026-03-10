@@ -250,19 +250,35 @@ Rename sessions:
 ### Discord Bot
 - Auto-reconnects with exponential backoff (1s to 10 min) on disconnect
 - Daemon stays running when control window closes (for Discord-only operation)
-- Commands: `/term list`, `/term new`, `/term screenshot`, `/term run`, `/term connect`, `/term disconnect`, `/term focus`, `/term close`
+- Slash commands: `/term list`, `/term new`, `/term screenshot`, `/term run`, `/term connect <name>`, `/term disconnect <name>`, `/term focus`, `/term close`
 - Token stored in macOS keyring (`prompt-grid/discord_bot_token`)
 - Logs to `~/.config/prompt-grid/discord.log`
+
+#### Off-By-Default Streaming
+- Streamers are created for all sessions but start **inactive** (no output sent to Discord)
+- Activated by typing in a session's Discord channel or via `/term connect`
+- Special channel commands (not forwarded to tmux): `connect` (activates + sends current screen), `disconnect` (deactivates)
+- Any other message in a channel activates streaming AND forwards input to the tmux session
+- On activation, current screen is sent immediately as a code block (`SendCurrentScreen`)
+- Auto-deactivates after 1 hour of no Discord messages (lazy check in `pollOnce`, no timer)
+- Slash commands `/term screenshot` and `/term run` also activate the targeted session's streamer
 
 #### Session Lifecycle Integration
 - Auto-creates Discord channels for each terminal session in a dedicated category
 - Session lifecycle handlers: `SessionAdded`, `SessionRenamed`, `SessionClosed`
 - Maintains session-to-channel mapping (`sessionChannels`, `channelSessions`)
 - Channel names sanitized from session names (alphanumeric + hyphens, fallback to "session")
-- Orphan channel cleanup: removes Discord channels when sessions are deleted
-- Orphan session cleanup: stops streaming to channels that no longer exist
-- Each session gets dedicated Streamer that auto-streams terminal output to its Discord channel
+- Orphan channel cleanup runs BEFORE channel creation (Discord 50-channel-per-category limit)
+- Orphan detection: matches by channel name (not just map lookup) — safe even when sessionChannels map is empty at startup
 - Claude UI footer (prompt/status lines) stripped from streamed output via `stripClaudeFooter()`
+
+### Claude Auto-Menu Detection
+- `detectClaudeMenu(screen)` in `src/gui/prompt.go` detects numbered permission prompts (e.g., "1. Yes  2. No")
+- Requires 2+ consecutive numbered lines near cursor AND Claude indicators (Cost/Duration) above
+- When detected, auto-sends "1" + Enter via `tmux.SendKeys` with 3s cooldown per session
+- Togglable via settings gear dropdown in control center header
+- Persisted in config as `claude.auto_menu` (default: true)
+- `lastAutoMenuTime` on `SessionState` prevents rapid-fire re-sends
 
 ### Memory Safeguards
 - **Scrollback cap**: 10K lines per session (~416 screens), oldest chunks trimmed (`src/emulator/scrollback.go`). Reduced from 100K to prevent OOM — 29 sessions × 10K × 120 cols × 16 bytes ≈ 556MB
@@ -276,7 +292,7 @@ Rename sessions:
 - **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/prompt-grid/memdump-{timestamp}.log`.
 
 ## Testing
-195 tests covering emulator, PTY, PTY log persistence, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes, session metadata persistence, session recreation after reboot, CWD tracking, claude --continue on recreate, prompt detection.
+199 tests covering emulator, PTY, PTY log persistence, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes, session metadata persistence, session recreation after reboot, CWD tracking, claude --continue on recreate, prompt detection, Claude menu detection, Discord streamer activation/deactivation/timeout.
 
 ### Test Isolation with Realms
 - `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories
