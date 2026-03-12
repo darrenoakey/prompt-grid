@@ -31,9 +31,10 @@ type TerminalWidget struct {
 	cellW        int
 	cellH        int
 	focused      bool
-	requestFocus bool // Set by parent to request focus each frame
-	skipKeyboard bool // When true, parent handles keyboard (used in control center)
-	backToBottom bool // Stable click target for "Current" button (Gio event routing)
+	requestFocus bool    // Set by parent to request focus each frame
+	skipKeyboard bool    // When true, parent handles keyboard (used in control center)
+	backToBottom bool    // Stable click target for "Current" button (Gio event routing)
+	scrollAccum  float32 // Accumulated fractional scroll for sub-line trackpad deltas
 }
 
 // NewTerminalWidget creates a new terminal widget
@@ -134,20 +135,29 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 		if e, ok := ev.(pointer.Event); ok {
 			switch e.Kind {
 			case pointer.Scroll:
-				// Scroll.Y: positive = scroll down (toward bottom), negative = scroll up (toward top/history)
-				// We want: scroll up (negative Y) = increase offset (view history)
-				// Convert pixels to lines - trackpad sends small increments
-				delta := int(e.Scroll.Y / 3) // Positive Y = scroll down = decrease offset
-				if delta == 0 && e.Scroll.Y != 0 {
-					// Ensure at least 1 line scroll for small movements
-					if e.Scroll.Y > 0 {
-						delta = 1
-					} else {
-						delta = -1
-					}
+				// Accumulate fractional scroll (trackpad sends sub-line pixel deltas).
+				w.scrollAccum += e.Scroll.Y
+
+				// Base rate: 3 pixels per line.
+				delta := int(w.scrollAccum / 3)
+				if delta == 0 {
+					break // Keep accumulating until we have a full line.
 				}
-				// Invert: scrolling down (positive delta) should decrease offset (toward live)
-				// scrolling up (negative delta) should increase offset (toward history)
+				w.scrollAccum -= float32(delta * 3) // Consume only what we used.
+
+				// Acceleration: fast scrolling covers more ground.
+				absDelta := delta
+				if absDelta < 0 {
+					absDelta = -absDelta
+				}
+				if absDelta > 10 {
+					delta *= 3
+				} else if absDelta > 3 {
+					delta *= 2
+				}
+
+				// Positive delta = scroll down (toward live) = decrease offset.
+				// Negative delta = scroll up (toward history) = increase offset.
 				w.state.AdjustScrollOffset(-delta)
 
 			case pointer.Press, pointer.Drag, pointer.Release:

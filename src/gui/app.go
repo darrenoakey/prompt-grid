@@ -1087,7 +1087,9 @@ func (a *App) RecolorSession(name string) {
 	a.invalidateSession(name)
 }
 
-// invalidateSession signals windows to redraw for a session
+// invalidateSession signals windows to redraw for a session.
+// Only invalidates the control window when this is the selected session,
+// avoiding unnecessary redraws from background session output.
 func (a *App) invalidateSession(name string) {
 	a.mu.RLock()
 	state := a.sessions[name]
@@ -1097,7 +1099,7 @@ func (a *App) invalidateSession(name string) {
 		state.window.Invalidate()
 	}
 
-	if a.controlWin != nil {
+	if a.controlWin != nil && a.controlWin.selected == name {
 		a.controlWin.Invalidate()
 	}
 }
