@@ -70,6 +70,10 @@ type SessionState struct {
 	ptyLog       *ptylog.Writer      // PTY output logger for persistence
 	promptStatus PromptStatusValue   // Current prompt detection status (atomic)
 
+	// screenMu protects parser/screen/scrollback/scrollOffset from concurrent
+	// access between the PTY data callback (writes) and the Gio render thread (reads).
+	screenMu sync.RWMutex
+
 	// Scrollback viewing state
 	scrollOffset int  // Lines scrolled up from bottom (0 = viewing live terminal)
 	scrollMode   bool // True when user is viewing history (frozen view)
@@ -148,14 +152,18 @@ func (s *SessionState) SetScrollOffset(offset int) {
 
 // AdjustScrollOffset adds delta to scroll offset (positive = scroll up/back in history).
 // Automatically enters/exits scroll mode based on resulting offset.
+// Called from the Gio main thread only.
 func (s *SessionState) AdjustScrollOffset(delta int) {
+	s.screenMu.Lock()
 	s.SetScrollOffset(s.scrollOffset + delta)
 	s.scrollMode = s.scrollOffset > 0
 	s.scrollback.SetFrozen(s.scrollMode)
+	s.screenMu.Unlock()
 }
 
 // ResetScrollOffset snaps back to live view (bottom).
 // Skipped when in scroll mode so the user's view stays frozen.
+// Called from both PTY callback (under screenMu) and Gio thread.
 func (s *SessionState) ResetScrollOffset() {
 	if !s.scrollMode {
 		s.scrollOffset = 0
@@ -163,15 +171,29 @@ func (s *SessionState) ResetScrollOffset() {
 }
 
 // ScrollToBottom exits scroll mode and snaps to live view.
+// Called from the Gio main thread only.
 func (s *SessionState) ScrollToBottom() {
+	s.screenMu.Lock()
 	s.scrollOffset = 0
 	s.scrollMode = false
 	s.scrollback.SetFrozen(false)
+	s.screenMu.Unlock()
 }
 
 // InScrollMode returns true when the user is viewing history.
 func (s *SessionState) InScrollMode() bool {
 	return s.scrollMode
+}
+
+// LockScreen takes a read lock on the screen/scrollback state.
+// Use when reading screen content from a non-Gio goroutine (e.g., Discord streamer).
+func (s *SessionState) LockScreen() {
+	s.screenMu.RLock()
+}
+
+// UnlockScreen releases the read lock taken by LockScreen.
+func (s *SessionState) UnlockScreen() {
+	s.screenMu.RUnlock()
 }
 
 // StartSelection begins a new selection at the given cell position
@@ -357,8 +379,12 @@ func (a *App) updateAllPromptStatuses() {
 	needsInvalidate := false
 	now := time.Now()
 	for _, ref := range sessions {
+		ref.state.screenMu.RLock()
 		screen := ref.state.Screen()
 		newStatus := detectPromptStatus(screen)
+		menuDetected := autoMenu && now.Sub(ref.state.lastAutoMenuTime) > 3*time.Second && detectClaudeMenu(screen)
+		ref.state.screenMu.RUnlock()
+
 		old := ref.state.promptStatus.Load()
 		if old != newStatus {
 			ref.state.promptStatus.Store(newStatus)
@@ -366,11 +392,9 @@ func (a *App) updateAllPromptStatuses() {
 		}
 
 		// Auto-answer Claude numbered menus
-		if autoMenu && now.Sub(ref.state.lastAutoMenuTime) > 3*time.Second {
-			if detectClaudeMenu(screen) {
-				ref.state.lastAutoMenuTime = now
-				tmux.SendKeys(ref.name, "1", "Enter")
-			}
+		if menuDetected {
+			ref.state.lastAutoMenuTime = now
+			tmux.SendKeys(ref.name, "1", "Enter")
 		}
 	}
 
@@ -442,6 +466,7 @@ func (a *App) discoverSessions() {
 // Shared between reconnectSession, NewSession, and recreateSession.
 func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 	state.pty.SetOnData(func(data []byte) {
+		state.screenMu.Lock()
 		oldCount := state.scrollback.Count()
 		state.parser.Parse(data)
 		// In scroll mode, compensate scrollOffset so the view stays on the same
@@ -452,10 +477,11 @@ func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 				state.scrollOffset += delta
 			}
 		}
+		state.ResetScrollOffset() // Snap to bottom on new output (no-op in scroll mode)
+		state.screenMu.Unlock()
 		if state.ptyLog != nil {
 			state.ptyLog.Write(data)
 		}
-		state.ResetScrollOffset() // Snap to bottom on new output (no-op in scroll mode)
 		a.invalidateSession(name)
 	})
 

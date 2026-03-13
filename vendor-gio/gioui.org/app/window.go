@@ -97,6 +97,11 @@ type Window struct {
 	invMu         sync.Mutex
 	mayInvalidate bool
 
+	// scrollFn is called directly for scroll events, bypassing Gio's
+	// event router whose hit test fails between frames on macOS 26.
+	scrollMu sync.Mutex
+	scrollFn func(dx, dy float32)
+
 	// coalesced tracks the most recent events waiting to be delivered
 	// to the client.
 	coalesced eventSummary
@@ -283,6 +288,16 @@ func (w *Window) Invalidate() {
 		w.mayInvalidate = false
 		w.driver.Invalidate()
 	}
+}
+
+// SetScrollCallback registers a function that is called directly for mouse
+// scroll events, bypassing Gio's event router. This is needed on macOS 26+
+// where the router's hit test fails between frames, dropping scroll events.
+// The callback receives scroll deltas in Gio pixels.
+func (w *Window) SetScrollCallback(fn func(dx, dy float32)) {
+	w.scrollMu.Lock()
+	w.scrollFn = fn
+	w.scrollMu.Unlock()
 }
 
 // Option applies the options to the window. The options are hints; the platform is
@@ -694,6 +709,19 @@ func (w *Window) processEvent(e event.Event) bool {
 		e := e2
 		if focusDir != -1 {
 			e = input.SystemEvent{Event: e}
+		}
+		// Intercept scroll events for the direct callback path.
+		if pe, ok := e2.(pointer.Event); ok && pe.Kind == pointer.Scroll {
+			w.scrollMu.Lock()
+			fn := w.scrollFn
+			w.scrollMu.Unlock()
+			if fn != nil {
+				fn(pe.Scroll.X, pe.Scroll.Y)
+				// Still schedule a frame so the UI updates.
+				w.setNextFrame(time.Time{})
+				w.updateAnimation()
+				return true
+			}
 		}
 		w.queue.Queue(e)
 		t, handled := w.queue.WakeupTime()

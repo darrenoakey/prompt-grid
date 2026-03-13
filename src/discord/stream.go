@@ -323,9 +323,11 @@ func (s *Streamer) SendCurrentScreen() {
 }
 
 func (s *Streamer) captureSnapshot() []string {
+	s.state.LockScreen()
 	screen := s.state.Screen()
 	cols, rows := screen.Size()
 	if cols <= 0 || rows <= 0 {
+		s.state.UnlockScreen()
 		return nil
 	}
 
@@ -342,6 +344,7 @@ func (s *Streamer) captureSnapshot() []string {
 		}
 		lines[y] = strings.TrimRight(string(row), " ")
 	}
+	s.state.UnlockScreen()
 
 	filtered := stripClaudeFooter(lines)
 	for len(filtered) > 0 && strings.TrimSpace(filtered[len(filtered)-1]) == "" {

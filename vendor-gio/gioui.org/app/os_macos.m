@@ -75,6 +75,24 @@ static void handleMouse(GioView *view, NSEvent *event, int typ, CGFloat dx, CGFl
 }
 
 @implementation GioView
+- (BOOL)acceptsFirstResponder {
+	return YES;
+}
+- (void)updateTrackingAreas {
+	[super updateTrackingAreas];
+	for (NSTrackingArea *area in self.trackingAreas) {
+		[self removeTrackingArea:area];
+	}
+	NSTrackingArea *ta = [[NSTrackingArea alloc]
+		initWithRect:self.bounds
+		options:(NSTrackingMouseEnteredAndExited |
+				 NSTrackingMouseMoved |
+				 NSTrackingActiveAlways |
+				 NSTrackingInVisibleRect)
+		owner:self
+		userInfo:nil];
+	[self addTrackingArea:ta];
+}
 - (void)setFrameSize:(NSSize)newSize {
 	[super setFrameSize:newSize];
 	[self setNeedsDisplay:YES];
@@ -446,6 +464,26 @@ void gio_main() {
 		[NSApp setMainMenu:menuBar];
 
 		globalWindowDel = [[GioWindowDelegate alloc] init];
+
+		// macOS 26+: scrollWheel: may not be delivered to the NSView.
+		// Intercept scroll events at the application level and forward
+		// to the GioView directly. The GioView's scrollWheel: is kept as
+		// a fallback; deduplication uses the event timestamp in Go.
+		[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel
+			handler:^NSEvent *(NSEvent *event) {
+				NSWindow *win = [event window];
+				if (win) {
+					NSView *cv = [win contentView];
+					if (cv && [cv isKindOfClass:[GioView class]]) {
+						GioView *view = (GioView *)cv;
+						CGFloat dx = -event.scrollingDeltaX;
+						CGFloat dy = -event.scrollingDeltaY;
+						handleMouse(view, event, MOUSE_SCROLL, dx, dy);
+						return nil;
+					}
+				}
+				return event;
+			}];
 
 		[NSApp run];
 	}

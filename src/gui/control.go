@@ -164,6 +164,27 @@ func NewControlWindow(application *App) *ControlWindow {
 	win.searchEditor.SingleLine = true
 	win.searchEditor.Submit = false
 
+	// Register scroll callback to bypass Gio's broken event routing on macOS 26.
+	win.window.SetScrollCallback(func(dx, dy float32) {
+		if win.selected == "" {
+			return
+		}
+		state := win.app.GetSession(win.selected)
+		if state == nil {
+			return
+		}
+		// dy is in Gio pixels; convert to lines (3 pixels per line).
+		delta := int(dy / 3)
+		if delta == 0 {
+			if dy > 0 {
+				delta = 1
+			} else if dy < 0 {
+				delta = -1
+			}
+		}
+		state.AdjustScrollOffset(-delta)
+	})
+
 	return win
 }
 

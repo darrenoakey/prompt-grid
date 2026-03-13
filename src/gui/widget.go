@@ -62,15 +62,20 @@ func (w *TerminalWidget) Layout(gtx layout.Context) layout.Dimensions {
 	// Padding around content
 	padding := 8
 
+	// Handle input first (may modify scrollOffset via AdjustScrollOffset).
+	// This runs on the Gio main thread before we take the read lock.
+	w.handleInput(gtx)
+
+	// Hold the read lock for the entire render phase so the PTY callback
+	// cannot modify screen/scrollback/scrollOffset mid-frame.
+	w.state.screenMu.RLock()
+
 	// Calculate dimensions
 	cols, rows := w.state.Screen().Size()
 	contentWidth := cols * w.cellW
 	contentHeight := rows * w.cellH
 	width := contentWidth + padding*2
 	height := contentHeight + padding*2
-
-	// Handle keyboard input
-	w.handleInput(gtx)
 
 	// Draw background for entire area
 	size := image.Point{X: width, Y: height}
@@ -94,7 +99,11 @@ func (w *TerminalWidget) Layout(gtx layout.Context) layout.Dimensions {
 	if w.state.scrollOffset > 0 {
 		w.renderScrollbar(gtx, width, height, padding)
 	}
-	if w.state.InScrollMode() {
+	scrollMode := w.state.InScrollMode()
+
+	w.state.screenMu.RUnlock()
+
+	if scrollMode {
 		w.renderBackToBottom(gtx, width, height)
 	}
 
@@ -105,7 +114,8 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 	padding := 8
 
 	// Set up clip area for input - this defines the clickable/focusable region
-	areaStack := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
+	clipMax := gtx.Constraints.Max
+	areaStack := clip.Rect{Max: clipMax}.Push(gtx.Ops)
 
 	// Register this widget for pointer and key events
 	event.Op(gtx.Ops, w)
@@ -118,15 +128,15 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 	areaStack.Pop()
 
 	// Process pointer events for selection and scrolling
-	// All pointer event types must be in a single filter
-	// ScrollY bounds are REQUIRED — without them Gio rejects all scroll events
-	scrollMax := w.state.scrollback.Count()
+	// All pointer event types must be in a single filter.
+	// ScrollY bounds are REQUIRED — without them Gio rejects all scroll events.
+	// ScrollRange is a per-event clamp, not a budget; use large values.
 	for {
 		ev, ok := gtx.Event(
 			pointer.Filter{
 				Target:  w,
 				Kinds:   pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll,
-				ScrollY: pointer.ScrollRange{Min: -scrollMax, Max: scrollMax},
+				ScrollY: pointer.ScrollRange{Min: -1_000_000, Max: 1_000_000},
 			},
 		)
 		if !ok {
@@ -159,6 +169,8 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 				// Positive delta = scroll down (toward live) = decrease offset.
 				// Negative delta = scroll up (toward history) = increase offset.
 				w.state.AdjustScrollOffset(-delta)
+				// Request another frame so continued scrolling is responsive.
+				gtx.Execute(op.InvalidateCmd{})
 
 			case pointer.Press, pointer.Drag, pointer.Release:
 				// Convert pixel position to cell coordinates
