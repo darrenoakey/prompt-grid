@@ -112,7 +112,16 @@ tmux wrapper (`src/tmux/tmux.go`):
 - `name string` - session name
 - `sshHost string` - SSH host (empty for local sessions)
 - `ptyLog *ptylog.Writer` - PTY output logger for persistence
-- Accessors: `PTY()`, `Name()`, `IsSSH()`, `SSHHost()`
+- `screenMu sync.RWMutex` - protects parser/screen/scrollback/scrollOffset from concurrent access
+- Accessors: `PTY()`, `Name()`, `IsSSH()`, `SSHHost()`, `LockScreen()`, `UnlockScreen()`
+
+### Thread Safety (screenMu)
+- PTY `OnData` callback takes `screenMu.Lock()` around parser/scrollback/scrollOffset writes
+- Gio render thread takes `screenMu.RLock()` for the entire render phase (after `handleInput`, before `renderBackToBottom`)
+- Discord streamer `captureSnapshot` takes `screenMu.RLock()` via `LockScreen()`/`UnlockScreen()`
+- Prompt detector takes `screenMu.RLock()` around `Screen()` + `detectPromptStatus()` + `detectClaudeMenu()`
+- `AdjustScrollOffset()` and `ScrollToBottom()` take `screenMu.Lock()` (called from Gio thread only)
+- `handleInput()` runs BEFORE the read lock so scroll adjustments don't deadlock
 
 ### Gio GUI Notes
 - Use `new(app.Window)` then `win.Option()` separately (not `app.NewWindow()`)
@@ -239,7 +248,8 @@ Rename sessions:
 - **CRITICAL**: All pointer event types (Press, Drag, Release, Scroll) must be in ONE filter - separate filters don't work
 - **CRITICAL**: When switching keyboard input between handlers (e.g., rename input vs terminal), explicitly request focus with `gtx.Execute(key.FocusCmd{Tag: target})`. Without it, `key.EditEvent` (typed characters) won't be delivered to the new handler. Also disable competing handlers during the switch to prevent event stealing.
 - **CRITICAL (focus fight)**: When embedding a widget with `skipKeyboard=true` (parent handles keyboard), the widget must NOT call `gtx.Execute(key.FocusCmd{Tag: w})` on pointer.Press. Otherwise it steals focus from the parent's keyboard handler, making clipboard (Cmd+C/V) and all key input stop working.
-- **CRITICAL (scroll events)**: `pointer.Filter` requires `ScrollY` (and/or `ScrollX`) bounds for scroll events to be delivered. Default `{Min: 0, Max: 0}` silently rejects all scroll events. Set bounds based on scrollable content size.
+- **CRITICAL (scroll events)**: `pointer.Filter` requires `ScrollY` (and/or `ScrollX`) bounds for scroll events to be delivered. Default `{Min: 0, Max: 0}` silently rejects all scroll events. Use large fixed bounds (`{Min: -1_000_000, Max: 1_000_000}`) — `ScrollRange` is a per-event clamp, not a budget.
+- **CRITICAL (macOS 26 scroll)**: Gio's event router hit test fails between frames on macOS 26, dropping scroll events. Fix: `NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel` in `os_macos.m` intercepts scroll events at the application level and calls `handleMouse` directly. On the Go side, `Window.SetScrollCallback(fn)` registers a direct callback that bypasses the router — `processEvent` intercepts `pointer.Scroll` events and calls the callback before they reach the queue. GioView also needs `acceptsFirstResponder` and `updateTrackingAreas` for reliable event delivery.
 - **CRITICAL (Tab key)**: Gio intercepts Tab as a `SystemEvent` for focus navigation. Catch-all `key.Filter` (empty `Name`) skips SystemEvents. To receive Tab in a terminal widget, add an explicit `key.Filter{Name: key.NameTab}` alongside the catch-all filter. Without this, Tab is consumed by Gio and never reaches the widget's event handler.
 - **CRITICAL (macOS deadlock)**: NEVER call blocking operations (subprocess, cross-window `window.Option()`) synchronously from within a Gio frame handler. On macOS, the Cocoa main thread blocks while the frame handler runs. If the frame handler calls `window.Option()` on a different window, it dispatches to the Cocoa main thread → deadlock. All context menu actions (New Session, Close, Rename, Bring to Front) run in goroutines for this reason.
 - **Gio image fit**: `widget.Image{Src: logoOp, Fit: widget.Contain}` scales with aspect ratio preserved. Set `gtx.Constraints.Max` to the bounding box before Layout. Font weight: `font.Bold` from `gioui.org/font` package, NOT `text.Bold`.
