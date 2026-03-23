@@ -8,9 +8,10 @@ import (
 
 // SessionInfo describes a session for persistence across restarts
 type SessionInfo struct {
-	Type    string `json:"type"` // "shell", "ssh", "claude"
-	WorkDir string `json:"work_dir,omitempty"`
-	SSHHost string `json:"ssh_host,omitempty"`
+	Type         string `json:"type"`                    // "shell", "ssh", "claude"
+	WorkDir      string `json:"work_dir,omitempty"`
+	SSHHost      string `json:"ssh_host,omitempty"`
+	LastActivity int64  `json:"last_activity,omitempty"` // Unix timestamp of last PTY output
 }
 
 // ClaudeSettings holds Claude-aware behavior settings

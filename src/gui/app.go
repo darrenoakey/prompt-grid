@@ -461,6 +461,41 @@ func (a *App) updateAllCWDs() {
 	if changed {
 		a.saveConfig()
 	}
+
+	// Also persist lastActivity timestamps for all sessions
+	a.saveAllActivityTimes()
+}
+
+// saveAllActivityTimes persists each session's lastActivity to config.
+func (a *App) saveAllActivityTimes() {
+	if a.config == nil {
+		return
+	}
+
+	a.mu.RLock()
+	type activityRef struct {
+		name string
+		unix int64
+	}
+	var refs []activityRef
+	for name, state := range a.sessions {
+		refs = append(refs, activityRef{name: name, unix: state.lastActivity.Unix()})
+	}
+	a.mu.RUnlock()
+
+	changed := false
+	for _, ref := range refs {
+		if info, ok := a.config.GetSessionInfo(ref.name); ok {
+			if info.LastActivity != ref.unix {
+				info.LastActivity = ref.unix
+				a.config.SetSessionInfo(ref.name, info)
+				changed = true
+			}
+		}
+	}
+	if changed {
+		a.saveConfig()
+	}
 }
 
 // discoverSessions finds and reconnects to existing tmux sessions,
@@ -494,7 +529,11 @@ func (a *App) discoverSessions() {
 func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 	state.pty.SetOnData(func(data []byte) {
 		state.screenMu.Lock()
-		state.lastActivity = time.Now()
+		// Only update lastActivity after startup to avoid tmux screen redraws
+		// on reconnect overwriting the persisted value from config.
+		if a.startupComplete {
+			state.lastActivity = time.Now()
+		}
 		oldCount := state.scrollback.Count()
 		state.parser.Parse(data)
 		// In scroll mode, compensate scrollOffset so the view stays on the same
@@ -591,6 +630,12 @@ func (a *App) reconnectSession(name string) error {
 		}
 	}
 
+	// Restore persisted lastActivity; fall back to now for sessions without one
+	lastActivity := time.Now()
+	if sessionInfo.LastActivity > 0 {
+		lastActivity = time.Unix(sessionInfo.LastActivity, 0)
+	}
+
 	state := &SessionState{
 		pty:          ptySess,
 		name:         name,
@@ -600,7 +645,7 @@ func (a *App) reconnectSession(name string) error {
 		scrollback:   scrollback,
 		colors:       sessionColor,
 		ptyLog:       logWriter,
-		lastActivity: time.Now(),
+		lastActivity: lastActivity,
 	}
 
 	// Connect callbacks
@@ -672,6 +717,12 @@ func (a *App) recreateSession(name string, info config.SessionInfo) error {
 	// Look up or assign session color
 	sessionColor := a.resolveSessionColor(name)
 
+	// Restore persisted lastActivity; fall back to now for sessions without one
+	lastActivity := time.Now()
+	if info.LastActivity > 0 {
+		lastActivity = time.Unix(info.LastActivity, 0)
+	}
+
 	state := &SessionState{
 		pty:          ptySess,
 		name:         name,
@@ -681,7 +732,7 @@ func (a *App) recreateSession(name string, info config.SessionInfo) error {
 		scrollback:   scrollback,
 		colors:       sessionColor,
 		ptyLog:       logWriter,
-		lastActivity: time.Now(),
+		lastActivity: lastActivity,
 	}
 
 	// Connect callbacks
@@ -931,6 +982,33 @@ func (a *App) IsSessionActive(name string, within time.Duration) bool {
 		return false
 	}
 	return time.Since(state.lastActivity) <= within
+}
+
+// FilteredSessions returns the sessions visible in the sidebar given current
+// collapse mode, search query, selected session, and revealed sessions.
+// Used by the sidebar layout and by BDD tests.
+func (a *App) FilteredSessions(searchQuery, selected string, revealedSessions map[string]bool) (visible []string, hidden int) {
+	allSessions := a.ListSessions()
+	collapseMode := a.config != nil && a.config.GetCollapseInactive()
+
+	if searchQuery != "" {
+		for _, name := range allSessions {
+			if strings.Contains(strings.ToLower(name), strings.ToLower(searchQuery)) {
+				visible = append(visible, name)
+			}
+		}
+	} else if collapseMode {
+		for _, name := range allSessions {
+			if a.IsSessionActive(name, 2*time.Hour) || name == selected || revealedSessions[name] {
+				visible = append(visible, name)
+			} else {
+				hidden++
+			}
+		}
+	} else {
+		visible = allSessions
+	}
+	return
 }
 
 // detachSession clears the window reference when a standalone window closes.

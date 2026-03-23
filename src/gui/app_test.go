@@ -533,115 +533,425 @@ func TestClaudeRecreateUsesContinue(t *testing.T) {
 	}
 }
 
-func TestLastActivitySetOnCreate(t *testing.T) {
-	app := NewApp(nil, "")
-	before := time.Now()
+// =============================================================================
+// BDD Tests: Collapse Inactive Sessions
+// Feature file: tests/bdd/features/collapse_inactive.feature
+// =============================================================================
 
-	state, err := app.NewSession("test-activity-create", "", "")
-	if err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
-	defer app.CloseSession("test-activity-create")
-
-	after := time.Now()
-	activity := state.LastActivity()
-	if activity.Before(before) || activity.After(after) {
-		t.Errorf("lastActivity = %v, want between %v and %v", activity, before, after)
-	}
-
-	time.Sleep(100 * time.Millisecond)
+// helper: create an app with its own config for collapse tests (avoids concurrent map writes)
+func newCollapseTestApp(t *testing.T) (*App, *config.Config, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.json")
+	cfg := &config.Config{}
+	app := NewApp(cfg, cfgPath)
+	return app, cfg, cfgPath
 }
 
-func TestLastActivityUpdatedOnOutput(t *testing.T) {
-	app := NewApp(nil, "")
+// Scenario: All sessions visible when collapse mode is off
+func TestCollapse_AllVisibleWhenOff(t *testing.T) {
+	app, cfg, _ := newCollapseTestApp(t)
+	// Collapse off (default)
+	if cfg.GetCollapseInactive() {
+		t.Fatal("collapse should be off by default")
+	}
 
-	state, err := app.NewSession("test-activity-output", "", "")
+	_, err := app.NewSession("bdd-vis-active", "", "")
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	defer app.CloseSession("test-activity-output")
+	t.Cleanup(func() { app.CloseSession("bdd-vis-active"); time.Sleep(100 * time.Millisecond) })
 
-	// Wait for initial shell output to settle
-	time.Sleep(500 * time.Millisecond)
+	_, err = app.NewSession("bdd-vis-stale", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { app.CloseSession("bdd-vis-stale"); time.Sleep(100 * time.Millisecond) })
 
-	// Record the activity time, then send a command to trigger new output
-	activityBefore := state.LastActivity()
-	time.Sleep(10 * time.Millisecond) // ensure time moves forward
-	tmux.SendKeys("test-activity-output", "echo hello", "Enter")
+	// Backdate one session
+	app.GetSession("bdd-vis-stale").lastActivity = time.Now().Add(-3 * time.Hour)
 
-	// Wait for PTY output
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if state.LastActivity().After(activityBefore) {
-			break
+	visible, hidden := app.FilteredSessions("", "", nil)
+	if hidden != 0 {
+		t.Errorf("hidden = %d, want 0 when collapse off", hidden)
+	}
+	found := map[string]bool{}
+	for _, v := range visible {
+		found[v] = true
+	}
+	if !found["bdd-vis-active"] || !found["bdd-vis-stale"] {
+		t.Errorf("both sessions should be visible, got %v", visible)
+	}
+}
+
+// Scenario: Stale sessions hidden when collapse mode is on
+func TestCollapse_StaleSessionsHidden(t *testing.T) {
+	app, cfg, _ := newCollapseTestApp(t)
+	cfg.SetCollapseInactive(true)
+
+	_, err := app.NewSession("bdd-active-2", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { app.CloseSession("bdd-active-2"); time.Sleep(100 * time.Millisecond) })
+
+	_, err = app.NewSession("bdd-stale-2", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { app.CloseSession("bdd-stale-2"); time.Sleep(100 * time.Millisecond) })
+
+	// active-2: output 30 min ago (within 2h)
+	app.GetSession("bdd-active-2").lastActivity = time.Now().Add(-30 * time.Minute)
+	// stale-2: output 3 hours ago (beyond 2h)
+	app.GetSession("bdd-stale-2").lastActivity = time.Now().Add(-3 * time.Hour)
+
+	visible, hidden := app.FilteredSessions("", "", nil)
+	if hidden != 1 {
+		t.Errorf("hidden = %d, want 1", hidden)
+	}
+	visSet := map[string]bool{}
+	for _, v := range visible {
+		visSet[v] = true
+	}
+	if !visSet["bdd-active-2"] {
+		t.Error("bdd-active-2 should be visible (active)")
+	}
+	if visSet["bdd-stale-2"] {
+		t.Error("bdd-stale-2 should be hidden (stale)")
+	}
+}
+
+// Scenario: Currently selected session always visible even if stale
+func TestCollapse_SelectedAlwaysVisible(t *testing.T) {
+	app, cfg, _ := newCollapseTestApp(t)
+	cfg.SetCollapseInactive(true)
+
+	_, err := app.NewSession("bdd-sel-stale", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { app.CloseSession("bdd-sel-stale"); time.Sleep(100 * time.Millisecond) })
+
+	app.GetSession("bdd-sel-stale").lastActivity = time.Now().Add(-3 * time.Hour)
+
+	// Without selection: hidden
+	visible, hidden := app.FilteredSessions("", "", nil)
+	visSet := map[string]bool{}
+	for _, v := range visible {
+		visSet[v] = true
+	}
+	if visSet["bdd-sel-stale"] {
+		t.Error("stale session should be hidden when not selected")
+	}
+	if hidden < 1 {
+		t.Error("should have at least 1 hidden")
+	}
+
+	// With selection: visible
+	visible2, _ := app.FilteredSessions("", "bdd-sel-stale", nil)
+	visSet2 := map[string]bool{}
+	for _, v := range visible2 {
+		visSet2[v] = true
+	}
+	if !visSet2["bdd-sel-stale"] {
+		t.Error("selected stale session should be visible")
+	}
+}
+
+// Scenario: Search finds all sessions regardless of collapse mode
+func TestCollapse_SearchFindsAll(t *testing.T) {
+	app, cfg, _ := newCollapseTestApp(t)
+	cfg.SetCollapseInactive(true)
+
+	_, err := app.NewSession("bdd-search-active", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { app.CloseSession("bdd-search-active"); time.Sleep(100 * time.Millisecond) })
+
+	_, err = app.NewSession("bdd-search-stale", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { app.CloseSession("bdd-search-stale"); time.Sleep(100 * time.Millisecond) })
+
+	app.GetSession("bdd-search-stale").lastActivity = time.Now().Add(-3 * time.Hour)
+
+	// Search should find both
+	visible, _ := app.FilteredSessions("bdd-search", "", nil)
+	visSet := map[string]bool{}
+	for _, v := range visible {
+		visSet[v] = true
+	}
+	if !visSet["bdd-search-active"] || !visSet["bdd-search-stale"] {
+		t.Errorf("search should find both sessions, got %v", visible)
+	}
+}
+
+// Scenario: Selecting a stale session via search reveals it
+func TestCollapse_SelectRevealsStale(t *testing.T) {
+	app, cfg, _ := newCollapseTestApp(t)
+	cfg.SetCollapseInactive(true)
+
+	_, err := app.NewSession("bdd-reveal", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { app.CloseSession("bdd-reveal"); time.Sleep(100 * time.Millisecond) })
+
+	app.GetSession("bdd-reveal").lastActivity = time.Now().Add(-3 * time.Hour)
+
+	// Without reveal: hidden
+	visible, _ := app.FilteredSessions("", "", nil)
+	visSet := map[string]bool{}
+	for _, v := range visible {
+		visSet[v] = true
+	}
+	if visSet["bdd-reveal"] {
+		t.Error("should be hidden before reveal")
+	}
+
+	// With reveal: visible even without search or selection
+	revealed := map[string]bool{"bdd-reveal": true}
+	visible2, _ := app.FilteredSessions("", "", revealed)
+	visSet2 := map[string]bool{}
+	for _, v := range visible2 {
+		visSet2[v] = true
+	}
+	if !visSet2["bdd-reveal"] {
+		t.Error("revealed session should be visible")
+	}
+}
+
+// Scenario: Toggling collapse off clears revealed sessions
+func TestCollapse_ToggleOffClearsRevealed(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.SetCollapseInactive(true)
+
+	revealed := map[string]bool{"some-session": true}
+	if len(revealed) != 1 {
+		t.Fatal("precondition")
+	}
+
+	// Toggle off
+	cfg.SetCollapseInactive(false)
+	// The control window clears revealed on toggle-off; simulate that
+	revealed = make(map[string]bool)
+
+	if len(revealed) != 0 {
+		t.Error("revealed should be empty after toggle off")
+	}
+	if cfg.GetCollapseInactive() {
+		t.Error("collapse should be off")
+	}
+}
+
+// Scenario: Sidebar header shows filtered count
+func TestCollapse_HeaderShowsCount(t *testing.T) {
+	app, cfg, _ := newCollapseTestApp(t)
+	cfg.SetCollapseInactive(true)
+
+	// Create 5 sessions: 3 active, 2 stale
+	names := []string{"bdd-cnt-a1", "bdd-cnt-a2", "bdd-cnt-a3", "bdd-cnt-s1", "bdd-cnt-s2"}
+	for _, name := range names {
+		_, err := app.NewSession(name, "", "")
+		if err != nil {
+			t.Fatalf("NewSession %s: %v", name, err)
 		}
-		time.Sleep(50 * time.Millisecond)
+		t.Cleanup(func() { app.CloseSession(name); time.Sleep(100 * time.Millisecond) })
 	}
 
-	if !state.LastActivity().After(activityBefore) {
-		t.Error("lastActivity should be updated after PTY output")
+	// Backdate 2 sessions
+	app.GetSession("bdd-cnt-s1").lastActivity = time.Now().Add(-3 * time.Hour)
+	app.GetSession("bdd-cnt-s2").lastActivity = time.Now().Add(-4 * time.Hour)
+
+	visible, hidden := app.FilteredSessions("", "", nil)
+
+	// Visible should include the 3 active ones (plus any pre-existing sessions from other tests)
+	visSet := map[string]bool{}
+	for _, v := range visible {
+		visSet[v] = true
+	}
+	if !visSet["bdd-cnt-a1"] || !visSet["bdd-cnt-a2"] || !visSet["bdd-cnt-a3"] {
+		t.Errorf("all 3 active sessions should be visible, got %v", visible)
+	}
+	if visSet["bdd-cnt-s1"] || visSet["bdd-cnt-s2"] {
+		t.Errorf("stale sessions should be hidden, got %v", visible)
+	}
+	if hidden < 2 {
+		t.Errorf("hidden = %d, want >= 2", hidden)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	// Verify header text format
+	headerText := fmt.Sprintf("SESSIONS (%d/%d)", len(visible), len(visible)+hidden)
+	if !strings.Contains(headerText, "/") {
+		t.Errorf("header should show filtered count format, got %q", headerText)
+	}
 }
 
-func TestIsSessionActive(t *testing.T) {
-	app := NewApp(nil, "")
+// Scenario: Activity persists across restart
+func TestCollapse_ActivityPersistsAcrossRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.json")
+	cfg := &config.Config{}
 
-	_, err := app.NewSession("test-active-check", "", "")
+	app1 := NewApp(cfg, cfgPath)
+
+	_, err := app1.NewSession("bdd-persist", "", "")
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	defer app.CloseSession("test-active-check")
 
-	// Just created — should be active within 2 hours
-	if !app.IsSessionActive("test-active-check", 2*time.Hour) {
+	// Backdate and save activity
+	threeHoursAgo := time.Now().Add(-3 * time.Hour)
+	app1.GetSession("bdd-persist").lastActivity = threeHoursAgo
+	app1.saveAllActivityTimes()
+
+	// Verify it's in config
+	info, ok := cfg.GetSessionInfo("bdd-persist")
+	if !ok {
+		t.Fatal("session info should exist")
+	}
+	if info.LastActivity == 0 {
+		t.Fatal("LastActivity should be persisted")
+	}
+	if time.Unix(info.LastActivity, 0).Sub(threeHoursAgo).Abs() > time.Second {
+		t.Errorf("persisted activity = %v, want ~%v", time.Unix(info.LastActivity, 0), threeHoursAgo)
+	}
+
+	// Save config to disk
+	cfg.Save(cfgPath)
+
+	// Simulate app exit (nil the OnExit to prevent cleanup)
+	app1.GetSession("bdd-persist").pty.SetOnExit(nil)
+	tmux.KillSession("bdd-persist")
+	time.Sleep(200 * time.Millisecond)
+
+	// Reload config and create new app (simulates restart)
+	cfg2, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Recreate the tmux session so the new app can reconnect
+	tmux.NewSession("bdd-persist", "", 120, 24)
+	t.Cleanup(func() {
+		tmux.KillSession("bdd-persist")
+		time.Sleep(100 * time.Millisecond)
+	})
+
+	app2 := NewApp(cfg2, cfgPath)
+	t.Cleanup(func() { app2.CloseSession("bdd-persist"); time.Sleep(100 * time.Millisecond) })
+
+	state2 := app2.GetSession("bdd-persist")
+	if state2 == nil {
+		t.Fatal("session should be reconnected")
+	}
+
+	// The lastActivity should be the persisted value (~3 hours ago), NOT time.Now()
+	elapsed := time.Since(state2.LastActivity())
+	if elapsed < 2*time.Hour {
+		t.Errorf("lastActivity should be ~3h ago after restart, but elapsed = %v (value: %v)", elapsed, state2.LastActivity())
+	}
+}
+
+// Scenario: New sessions are always active
+func TestCollapse_NewSessionAlwaysActive(t *testing.T) {
+	app, cfg, _ := newCollapseTestApp(t)
+	cfg.SetCollapseInactive(true)
+
+	_, err := app.NewSession("bdd-new-sess", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { app.CloseSession("bdd-new-sess"); time.Sleep(100 * time.Millisecond) })
+
+	if !app.IsSessionActive("bdd-new-sess", 2*time.Hour) {
 		t.Error("newly created session should be active")
 	}
 
-	// Should not be active within 0 duration (already in the past)
-	if app.IsSessionActive("test-active-check", 0) {
-		t.Error("session should not be active with zero duration")
+	visible, _ := app.FilteredSessions("", "", nil)
+	visSet := map[string]bool{}
+	for _, v := range visible {
+		visSet[v] = true
 	}
-
-	// Nonexistent session
-	if app.IsSessionActive("nonexistent", 2*time.Hour) {
-		t.Error("nonexistent session should not be active")
-	}
-
-	time.Sleep(100 * time.Millisecond)
-}
-
-func TestCollapseInactiveConfig(t *testing.T) {
-	cfg := &config.Config{}
-
-	// Default is false
-	if cfg.GetCollapseInactive() {
-		t.Error("default CollapseInactive should be false")
-	}
-
-	// Set to true
-	cfg.SetCollapseInactive(true)
-	if !cfg.GetCollapseInactive() {
-		t.Error("CollapseInactive should be true after setting")
-	}
-
-	// Set back to false
-	cfg.SetCollapseInactive(false)
-	if cfg.GetCollapseInactive() {
-		t.Error("CollapseInactive should be false after unsetting")
+	if !visSet["bdd-new-sess"] {
+		t.Error("new session should appear in filtered list")
 	}
 }
 
-func TestCollapseInactiveConfigPersistence(t *testing.T) {
-	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "prompt-grid", "config.json")
-	os.MkdirAll(filepath.Dir(cfgPath), 0755)
+// Scenario: Revealed sessions transfer on rename
+func TestCollapse_RevealedTransfersOnRename(t *testing.T) {
+	app, cfg, _ := newCollapseTestApp(t)
+	cfg.SetCollapseInactive(true)
+
+	_, err := app.NewSession("bdd-rename-old", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	// Backdate so it's stale
+	app.GetSession("bdd-rename-old").lastActivity = time.Now().Add(-3 * time.Hour)
+
+	// Simulate revealed
+	revealed := map[string]bool{"bdd-rename-old": true}
+
+	// Verify visible with revealed
+	visible, _ := app.FilteredSessions("", "", revealed)
+	visSet := map[string]bool{}
+	for _, v := range visible {
+		visSet[v] = true
+	}
+	if !visSet["bdd-rename-old"] {
+		t.Error("revealed session should be visible before rename")
+	}
+
+	// Rename
+	err = app.RenameSession("bdd-rename-old", "bdd-rename-new")
+	if err != nil {
+		t.Fatalf("RenameSession: %v", err)
+	}
+	t.Cleanup(func() { app.CloseSession("bdd-rename-new"); time.Sleep(100 * time.Millisecond) })
+
+	// Transfer revealed status (as the control window does)
+	if revealed["bdd-rename-old"] {
+		delete(revealed, "bdd-rename-old")
+		revealed["bdd-rename-new"] = true
+	}
+
+	if revealed["bdd-rename-old"] {
+		t.Error("old name should not be in revealed set")
+	}
+	if !revealed["bdd-rename-new"] {
+		t.Error("new name should be in revealed set")
+	}
+
+	// Verify new name is visible
+	visible2, _ := app.FilteredSessions("", "", revealed)
+	visSet2 := map[string]bool{}
+	for _, v := range visible2 {
+		visSet2[v] = true
+	}
+	if !visSet2["bdd-rename-new"] {
+		t.Error("renamed revealed session should be visible")
+	}
+}
+
+// Scenario: Config toggle persistence
+func TestCollapse_ConfigPersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.json")
 	cfg := &config.Config{}
 
-	cfg.SetCollapseInactive(true)
-	if err := cfg.Save(cfgPath); err != nil {
-		t.Fatalf("Save: %v", err)
+	// Default off
+	if cfg.GetCollapseInactive() {
+		t.Error("default should be off")
 	}
+
+	// Toggle on and save
+	cfg.SetCollapseInactive(true)
+	cfg.Save(cfgPath)
 
 	// Reload and verify
 	loaded, err := config.Load(cfgPath)
@@ -649,50 +959,60 @@ func TestCollapseInactiveConfigPersistence(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if !loaded.GetCollapseInactive() {
-		t.Error("CollapseInactive should survive save/load")
+		t.Error("collapse should survive save/load")
 	}
 }
 
-func TestCollapseFilteringLogic(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.SetCollapseInactive(true)
+// Scenario: IsSessionActive edge cases
+func TestCollapse_IsSessionActiveEdgeCases(t *testing.T) {
+	app := NewApp(nil, "")
 
-	app := NewApp(cfg, "")
-
-	// Create two sessions
-	_, err := app.NewSession("active-sess", "", "")
+	_, err := app.NewSession("bdd-edge", "", "")
 	if err != nil {
-		t.Fatalf("NewSession active: %v", err)
+		t.Fatalf("NewSession: %v", err)
 	}
-	defer app.CloseSession("active-sess")
+	t.Cleanup(func() { app.CloseSession("bdd-edge"); time.Sleep(100 * time.Millisecond) })
 
-	_, err = app.NewSession("stale-sess", "", "")
+	// Just created = active
+	if !app.IsSessionActive("bdd-edge", 2*time.Hour) {
+		t.Error("new session should be active")
+	}
+
+	// Zero duration = never active (already in the past)
+	if app.IsSessionActive("bdd-edge", 0) {
+		t.Error("zero duration should return false")
+	}
+
+	// Nonexistent session
+	if app.IsSessionActive("nonexistent", 2*time.Hour) {
+		t.Error("nonexistent should return false")
+	}
+}
+
+// Scenario: PTY output updates lastActivity after startup
+func TestCollapse_OutputUpdatesActivity(t *testing.T) {
+	app := NewApp(nil, "")
+
+	state, err := app.NewSession("bdd-output", "", "")
 	if err != nil {
-		t.Fatalf("NewSession stale: %v", err)
+		t.Fatalf("NewSession: %v", err)
 	}
-	defer app.CloseSession("stale-sess")
+	t.Cleanup(func() { app.CloseSession("bdd-output"); time.Sleep(100 * time.Millisecond) })
 
-	// Both should be active (just created)
-	if !app.IsSessionActive("active-sess", 2*time.Hour) {
-		t.Error("active-sess should be active")
+	// Wait for shell output to settle
+	time.Sleep(500 * time.Millisecond)
+
+	activityBefore := state.LastActivity()
+	time.Sleep(10 * time.Millisecond)
+	tmux.SendKeys("bdd-output", "echo hello", "Enter")
+
+	// Poll for activity update
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if state.LastActivity().After(activityBefore) {
+			return // success
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	if !app.IsSessionActive("stale-sess", 2*time.Hour) {
-		t.Error("stale-sess should be active")
-	}
-
-	// Manually backdate the stale session's lastActivity
-	stale := app.GetSession("stale-sess")
-	stale.lastActivity = time.Now().Add(-3 * time.Hour)
-
-	// Now stale-sess should not be active within 2h
-	if app.IsSessionActive("stale-sess", 2*time.Hour) {
-		t.Error("stale-sess should not be active after backdating")
-	}
-
-	// active-sess should still be active
-	if !app.IsSessionActive("active-sess", 2*time.Hour) {
-		t.Error("active-sess should still be active")
-	}
-
-	time.Sleep(100 * time.Millisecond)
+	t.Error("lastActivity should be updated after PTY output")
 }

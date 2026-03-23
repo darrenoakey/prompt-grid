@@ -70,14 +70,12 @@ type ControlWindow struct {
 	revealedSessions   map[string]bool           // Sessions revealed via search while collapse mode is on
 	hiddenCount        int                       // Number of sessions hidden by collapse mode (for display)
 	hiddenSessionsBtn  *hiddenSessionsButton     // Persistent target for "+N inactive" click area
-	collapseToggle     *collapseToggle           // Persistent target for collapse toggle in settings
+	sessionsHeader     *sessionsHeaderBtn        // Persistent target for SESSIONS header click (toggle collapse)
 }
 
 // settingsButton is a persistent target for the settings gear icon
 type settingsButton struct{}
 
-// collapseToggle is a persistent target for the collapse toggle in settings dropdown
-type collapseToggle struct{}
 
 // settingsMenuState tracks the settings dropdown
 type settingsMenuState struct {
@@ -90,6 +88,9 @@ type sessionButton struct{}
 
 // hiddenSessionsButton is a persistent target for the "+N inactive" click area
 type hiddenSessionsButton struct{}
+
+// sessionsHeaderBtn is a persistent target for clicking the SESSIONS header to toggle collapse
+type sessionsHeaderBtn struct{}
 
 // menuOverlay is used to catch clicks outside the context menu
 type menuOverlay struct{}
@@ -150,7 +151,7 @@ func NewControlWindow(application *App) *ControlWindow {
 		settingsBtn:      &settingsButton{},
 		revealedSessions:  make(map[string]bool),
 		hiddenSessionsBtn: &hiddenSessionsButton{},
-		collapseToggle:    &collapseToggle{},
+		sessionsHeader:    &sessionsHeaderBtn{},
 	}
 
 	// Load embedded logo
@@ -465,7 +466,7 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 				// Check if click is inside settings dropdown
 				pos := w.settingsMenu.position
 				menuWidth := 260
-				menuHeight := 64 // 2 items * 32px
+				menuHeight := 32
 				clickX, clickY := int(e.Position.X), int(e.Position.Y)
 				inMenu := clickX >= pos.X && clickX <= pos.X+menuWidth &&
 					clickY >= pos.Y && clickY <= pos.Y+menuHeight
@@ -699,8 +700,7 @@ func (w *ControlWindow) layoutSettingsButton(gtx layout.Context, x, y, size int)
 func (w *ControlWindow) layoutSettingsDropdown(gtx layout.Context) {
 	itemHeight := 32
 	menuWidth := 260
-	numItems := 2
-	menuHeight := itemHeight * numItems
+	menuHeight := itemHeight // One item
 
 	pos := w.settingsMenu.position
 
@@ -720,7 +720,7 @@ func (w *ControlWindow) layoutSettingsDropdown(gtx layout.Context) {
 		paint.FillShape(gtx.Ops, borderColor, edge.Op())
 	}
 
-	// Item 1: "Auto-answer Claude menus"
+	// Toggle item: "Auto-answer Claude menus"
 	autoMenu := w.app.config != nil && w.app.config.GetClaudeAutoMenu()
 	indicator := "○"
 	if autoMenu {
@@ -752,46 +752,6 @@ func (w *ControlWindow) layoutSettingsDropdown(gtx layout.Context) {
 	label.Color = color.NRGBA{R: 224, G: 224, B: 224, A: 255}
 	label.Layout(gtx)
 	textStack.Pop()
-
-	// Item 2: "Collapse inactive sessions"
-	collapseOn := w.app.config != nil && w.app.config.GetCollapseInactive()
-	indicator2 := "○"
-	if collapseOn {
-		indicator2 = "✓"
-	}
-	itemLabel2 := indicator2 + "  Collapse inactive sessions"
-
-	item2Stack := op.Offset(image.Pt(0, itemHeight)).Push(gtx.Ops)
-	item2Area := clip.Rect{Max: image.Point{X: menuWidth, Y: itemHeight}}.Push(gtx.Ops)
-	event.Op(gtx.Ops, w.collapseToggle)
-	for {
-		ev, ok := gtx.Event(
-			pointer.Filter{Target: w.collapseToggle, Kinds: pointer.Press},
-		)
-		if !ok {
-			break
-		}
-		if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
-			if w.app.config != nil {
-				newVal := !collapseOn
-				w.app.config.SetCollapseInactive(newVal)
-				w.app.saveConfig()
-				if !newVal {
-					// Turning off collapse: clear revealed sessions
-					w.revealedSessions = make(map[string]bool)
-				}
-			}
-			w.settingsMenu.visible = false
-		}
-	}
-	item2Area.Pop()
-
-	text2Stack := op.Offset(image.Pt(12, 7)).Push(gtx.Ops)
-	label2 := material.Label(w.theme, unit.Sp(13), itemLabel2)
-	label2.Color = color.NRGBA{R: 224, G: 224, B: 224, A: 255}
-	label2.Layout(gtx)
-	text2Stack.Pop()
-	item2Stack.Pop()
 
 	bgStack.Pop()
 }
@@ -831,40 +791,50 @@ func (w *ControlWindow) layoutSidebar(gtx layout.Context) layout.Dimensions {
 	// Get sessions and apply search + collapse filters
 	allSessions := w.app.ListSessions()
 	collapseMode := w.app.config != nil && w.app.config.GetCollapseInactive()
-	var sessions []string
-	w.hiddenCount = 0
-	if w.searchQuery != "" {
-		// Search always searches ALL sessions (ignores collapse)
-		for _, name := range allSessions {
-			if strings.Contains(strings.ToLower(name), w.searchQuery) {
-				sessions = append(sessions, name)
-			}
-		}
-	} else if collapseMode {
-		// Collapse mode: show active sessions, selected session, and revealed sessions
-		for _, name := range allSessions {
-			if w.app.IsSessionActive(name, 2*time.Hour) || name == w.selected || w.revealedSessions[name] {
-				sessions = append(sessions, name)
-			} else {
-				w.hiddenCount++
-			}
-		}
-	} else {
-		sessions = allSessions
-	}
+	sessions, hiddenCount := w.app.FilteredSessions(w.searchQuery, w.selected, w.revealedSessions)
+	w.hiddenCount = hiddenCount
 
 	// Layout sidebar sections vertically
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		// Header section: "SESSIONS (N)" or "SESSIONS (shown/total)"
+		// Header section: "SESSIONS (N)" — click to toggle collapse mode
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			headerHeight := 36
 			var headerText string
 			if collapseMode && w.hiddenCount > 0 && w.searchQuery == "" {
 				headerText = fmt.Sprintf("SESSIONS (%d/%d)", len(sessions), len(allSessions))
 			} else {
 				headerText = fmt.Sprintf("SESSIONS (%d)", len(allSessions))
 			}
+
+			// Click area for the entire header
+			clickArea := clip.Rect{Max: image.Point{X: sidebarWidth, Y: headerHeight}}.Push(gtx.Ops)
+			event.Op(gtx.Ops, w.sessionsHeader)
+			for {
+				ev, ok := gtx.Event(
+					pointer.Filter{Target: w.sessionsHeader, Kinds: pointer.Press},
+				)
+				if !ok {
+					break
+				}
+				if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
+					if w.app.config != nil {
+						newVal := !collapseMode
+						w.app.config.SetCollapseInactive(newVal)
+						w.app.saveConfig()
+						if !newVal {
+							w.revealedSessions = make(map[string]bool)
+						}
+					}
+				}
+			}
+			clickArea.Pop()
+
 			label := material.Label(w.theme, unit.Sp(10), headerText)
-			label.Color = color.NRGBA{R: 136, G: 136, B: 136, A: 255}
+			if collapseMode {
+				label.Color = color.NRGBA{R: 100, G: 180, B: 255, A: 255} // Blue tint when active
+			} else {
+				label.Color = color.NRGBA{R: 136, G: 136, B: 136, A: 255}
+			}
 			return layout.Inset{Top: unit.Dp(12), Bottom: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return layout.Center.Layout(gtx, label.Layout)
 			})
