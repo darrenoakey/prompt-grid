@@ -141,6 +141,15 @@ func CreateFontCollection() []font.FontFace {
 		Face: boldItalicFace,
 	})
 
+	// Symbol fallback font for glyphs not in JetBrains Mono (e.g. ⏵ U+23F5)
+	symbolFace, err := opentype.Parse(mustReadFont("NotoSansSymbols2-Regular.ttf"))
+	if err == nil {
+		collection = append(collection, font.FontFace{
+			Font: font.Font{Typeface: "Noto Sans Symbols 2"},
+			Face: symbolFace,
+		})
+	}
+
 	return collection
 }
 
