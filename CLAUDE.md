@@ -282,6 +282,19 @@ Rename sessions:
 - Orphan detection: matches by channel name (not just map lookup) — safe even when sessionChannels map is empty at startup
 - Claude UI footer (prompt/status lines) stripped from streamed output via `stripClaudeFooter()`
 
+### Collapse Inactive Sessions
+- Settings toggle: "Collapse inactive sessions" in gear dropdown
+- Persisted in config as `ui.collapse_inactive` (default: false)
+- When on: sidebar hides sessions with no PTY output in last 2 hours
+- Always shows: active sessions, currently selected session, "revealed" sessions
+- `lastActivity time.Time` on `SessionState`: updated in PTY `OnData` callback, initialized to `time.Now()` on create
+- `App.IsSessionActive(name, duration)`: checks if session's lastActivity is within duration
+- Search finds ALL sessions regardless of collapse mode
+- Selecting a hidden session via search adds it to `revealedSessions` map (stays visible)
+- "+N inactive" label at bottom of sidebar: clicking disables collapse mode
+- Header shows "SESSIONS (shown/total)" when sessions are hidden
+- `revealedSessions` cleared when collapse toggled off, entries transfer on rename
+
 ### Claude Auto-Menu Detection
 - `detectClaudeMenu(screen)` in `src/gui/prompt.go` detects numbered permission prompts (e.g., "1. Yes  2. No")
 - Requires 2+ consecutive numbered lines near cursor AND Claude indicators (Cost/Duration) above
@@ -302,7 +315,7 @@ Rename sessions:
 - **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/prompt-grid/memdump-{timestamp}.log`.
 
 ## Testing
-199 tests covering emulator, PTY, PTY log persistence, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes, session metadata persistence, session recreation after reboot, CWD tracking, claude --continue on recreate, prompt detection, Claude menu detection, Discord streamer activation/deactivation/timeout.
+185 tests covering emulator, PTY, PTY log persistence, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes, session metadata persistence, session recreation after reboot, CWD tracking, claude --continue on recreate, prompt detection, Claude menu detection, Discord streamer activation/deactivation/timeout, activity tracking, collapse filtering.
 
 ### Test Isolation with Realms
 - `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories
