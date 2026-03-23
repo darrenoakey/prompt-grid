@@ -198,7 +198,16 @@ func (w *Writer) Close() {
 	w.file.Close()
 }
 
-// ReplayLog reads a session's log file and feeds it through a parser in chunks.
+// replayTailSize is the maximum number of bytes to replay from the end of the
+// ptylog. The scrollback file already persists history; the ptylog replay only
+// needs to reconstruct the current screen state. 128KB is far more than enough
+// for any terminal size (e.g., 240×80 = 19200 chars).
+const replayTailSize = 128 * 1024
+
+// ReplayLog reads the tail of a session's log file and feeds it through a parser.
+// Only the last replayTailSize bytes are replayed — scrollback history is already
+// persisted in the .scrollback file, so replaying the full log is unnecessary and
+// causes long "scroll of old content" on restart for large logs.
 // Returns nil if the log file doesn't exist.
 func ReplayLog(name string, parser Parser) error {
 	path := LogPath(name)
@@ -210,6 +219,15 @@ func ReplayLog(name string, parser Parser) error {
 		return err
 	}
 	defer f.Close()
+
+	// Seek to tail if file is larger than replayTailSize
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() > replayTailSize {
+		f.Seek(info.Size()-replayTailSize, io.SeekStart)
+	}
 
 	buf := make([]byte, replayChunk)
 	for {
@@ -224,6 +242,15 @@ func ReplayLog(name string, parser Parser) error {
 			return err
 		}
 	}
+}
+
+// TruncateLog resets a session's log file to zero bytes.
+// Call after ReplayLog to prevent content duplication across restarts:
+// each restart replays the log then records tmux's screen redraw on top,
+// causing the same content to accumulate N times after N restarts.
+func TruncateLog(name string) {
+	path := LogPath(name)
+	os.Truncate(path, 0)
 }
 
 // DeleteLog removes the log file for a session

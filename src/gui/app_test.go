@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"prompt-grid/src/config"
+	"prompt-grid/src/emulator"
 	"prompt-grid/src/ptylog"
 	"prompt-grid/src/tmux"
 )
@@ -343,22 +344,11 @@ func TestSessionRecreateAfterTmuxDeath(t *testing.T) {
 		t.Errorf("type = %q, want shell", info.Type)
 	}
 
-	// Directly write PTY log data that produces scrollback when replayed
-	// (50+ lines of output to overflow a 24-row screen)
-	state := app.GetSession("test-recreate")
-	if state.ptyLog != nil {
-		state.ptyLog.Close()
-	}
-	var logData []byte
-	for i := 1; i <= 50; i++ {
-		logData = append(logData, []byte(fmt.Sprintf("Line %d\r\n", i))...)
-	}
-	os.WriteFile(ptylog.LogPath("test-recreate"), logData, 0644)
-
 	// Simulate a machine reboot: the OS kills the process instantly.
 	// In a real reboot no exit callbacks fire, so config is preserved on disk.
 	// We simulate this by clearing the OnExit callback before closing, so the
 	// config cleanup code never runs (just like the OS would not run it).
+	state := app.GetSession("test-recreate")
 	if state.pty != nil {
 		state.pty.SetOnExit(nil)
 		state.pty.Close()
@@ -385,11 +375,6 @@ func TestSessionRecreateAfterTmuxDeath(t *testing.T) {
 		t.Error("tmux session should exist after recreation")
 	}
 
-	// Verify scrollback was restored from PTY log replay
-	if state2.Scrollback().Count() == 0 {
-		t.Error("scrollback should be restored from PTY log replay")
-	}
-
 	// Cleanup
 	app2.CloseSession("test-recreate")
 	time.Sleep(100 * time.Millisecond)
@@ -408,18 +393,18 @@ func TestReconnectSessionRestoresScrollback(t *testing.T) {
 		t.Fatalf("NewSession: %v", err)
 	}
 
-	// Write a PTY log with enough data to produce scrollback
-	state := app.GetSession("test-reconnect-sb")
-	if state.ptyLog != nil {
-		state.ptyLog.Close()
-	}
-	var logData []byte
+	// Write scrollback data to the .scrollback file (scrollback is disk-persisted,
+	// not restored from ptylog replay).
+	sbPath := emulator.ScrollbackPath("test-reconnect-sb")
+	var sbLines []string
 	for i := 1; i <= 50; i++ {
-		logData = append(logData, []byte(fmt.Sprintf("Line %d\r\n", i))...)
+		// Each line is a JSON array of cells; minimal: [{"r":"X"}]
+		sbLines = append(sbLines, fmt.Sprintf(`[{"r":"%d"}]`, i))
 	}
-	os.WriteFile(ptylog.LogPath("test-reconnect-sb"), logData, 0644)
+	os.WriteFile(sbPath, []byte(strings.Join(sbLines, "\n")+"\n"), 0644)
 
 	// Close the app-side session (but keep tmux alive)
+	state := app.GetSession("test-reconnect-sb")
 	if state.pty != nil {
 		state.pty.Close()
 	}
@@ -439,9 +424,9 @@ func TestReconnectSessionRestoresScrollback(t *testing.T) {
 		t.Fatal("session should exist after reconnect")
 	}
 
-	// Scrollback should have been restored from log replay
+	// Scrollback should have been restored from the .scrollback file
 	if state2.Scrollback().Count() == 0 {
-		t.Error("scrollback should be restored from PTY log on reconnect")
+		t.Error("scrollback should be restored from .scrollback file on reconnect")
 	}
 
 	time.Sleep(100 * time.Millisecond)
@@ -546,4 +531,168 @@ func TestClaudeRecreateUsesContinue(t *testing.T) {
 	if !strings.Contains(string(argsData), "--continue") {
 		t.Errorf("claude was not started with --continue, got args: %q", string(argsData))
 	}
+}
+
+func TestLastActivitySetOnCreate(t *testing.T) {
+	app := NewApp(nil, "")
+	before := time.Now()
+
+	state, err := app.NewSession("test-activity-create", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer app.CloseSession("test-activity-create")
+
+	after := time.Now()
+	activity := state.LastActivity()
+	if activity.Before(before) || activity.After(after) {
+		t.Errorf("lastActivity = %v, want between %v and %v", activity, before, after)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestLastActivityUpdatedOnOutput(t *testing.T) {
+	app := NewApp(nil, "")
+
+	state, err := app.NewSession("test-activity-output", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer app.CloseSession("test-activity-output")
+
+	// Wait for initial shell output to settle
+	time.Sleep(500 * time.Millisecond)
+
+	// Record the activity time, then send a command to trigger new output
+	activityBefore := state.LastActivity()
+	time.Sleep(10 * time.Millisecond) // ensure time moves forward
+	tmux.SendKeys("test-activity-output", "echo hello", "Enter")
+
+	// Wait for PTY output
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if state.LastActivity().After(activityBefore) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if !state.LastActivity().After(activityBefore) {
+		t.Error("lastActivity should be updated after PTY output")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestIsSessionActive(t *testing.T) {
+	app := NewApp(nil, "")
+
+	_, err := app.NewSession("test-active-check", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer app.CloseSession("test-active-check")
+
+	// Just created — should be active within 2 hours
+	if !app.IsSessionActive("test-active-check", 2*time.Hour) {
+		t.Error("newly created session should be active")
+	}
+
+	// Should not be active within 0 duration (already in the past)
+	if app.IsSessionActive("test-active-check", 0) {
+		t.Error("session should not be active with zero duration")
+	}
+
+	// Nonexistent session
+	if app.IsSessionActive("nonexistent", 2*time.Hour) {
+		t.Error("nonexistent session should not be active")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestCollapseInactiveConfig(t *testing.T) {
+	cfg := &config.Config{}
+
+	// Default is false
+	if cfg.GetCollapseInactive() {
+		t.Error("default CollapseInactive should be false")
+	}
+
+	// Set to true
+	cfg.SetCollapseInactive(true)
+	if !cfg.GetCollapseInactive() {
+		t.Error("CollapseInactive should be true after setting")
+	}
+
+	// Set back to false
+	cfg.SetCollapseInactive(false)
+	if cfg.GetCollapseInactive() {
+		t.Error("CollapseInactive should be false after unsetting")
+	}
+}
+
+func TestCollapseInactiveConfigPersistence(t *testing.T) {
+	cfgPath := filepath.Join(os.Getenv("HOME"), ".config", "prompt-grid", "config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0755)
+	cfg := &config.Config{}
+
+	cfg.SetCollapseInactive(true)
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Reload and verify
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !loaded.GetCollapseInactive() {
+		t.Error("CollapseInactive should survive save/load")
+	}
+}
+
+func TestCollapseFilteringLogic(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.SetCollapseInactive(true)
+
+	app := NewApp(cfg, "")
+
+	// Create two sessions
+	_, err := app.NewSession("active-sess", "", "")
+	if err != nil {
+		t.Fatalf("NewSession active: %v", err)
+	}
+	defer app.CloseSession("active-sess")
+
+	_, err = app.NewSession("stale-sess", "", "")
+	if err != nil {
+		t.Fatalf("NewSession stale: %v", err)
+	}
+	defer app.CloseSession("stale-sess")
+
+	// Both should be active (just created)
+	if !app.IsSessionActive("active-sess", 2*time.Hour) {
+		t.Error("active-sess should be active")
+	}
+	if !app.IsSessionActive("stale-sess", 2*time.Hour) {
+		t.Error("stale-sess should be active")
+	}
+
+	// Manually backdate the stale session's lastActivity
+	stale := app.GetSession("stale-sess")
+	stale.lastActivity = time.Now().Add(-3 * time.Hour)
+
+	// Now stale-sess should not be active within 2h
+	if app.IsSessionActive("stale-sess", 2*time.Hour) {
+		t.Error("stale-sess should not be active after backdating")
+	}
+
+	// active-sess should still be active
+	if !app.IsSessionActive("active-sess", 2*time.Hour) {
+		t.Error("active-sess should still be active")
+	}
+
+	time.Sleep(100 * time.Millisecond)
 }

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"gioui.org/app"
 	"gioui.org/font"
@@ -30,6 +31,7 @@ import (
 
 	"prompt-grid/src/pty"
 	"prompt-grid/src/render"
+	"prompt-grid/src/tmux"
 )
 
 const sidebarWidth = 240
@@ -61,12 +63,21 @@ type ControlWindow struct {
 	searchEditor     widget.Editor             // Search input
 	searchQuery      string                    // Current search query
 	newSessionBtn    *sessionButton            // "NEW SESSION" button target
-	settingsMenu     *settingsMenuState        // Settings gear dropdown
-	settingsBtn      *settingsButton           // Persistent target for gear icon
+	settingsMenu       *settingsMenuState        // Settings gear dropdown
+	settingsBtn        *settingsButton           // Persistent target for gear icon
+	tabScrollOffset    int                       // Pixel offset for session list scrolling
+	tabListHeight      int                       // Total height of all session tabs (for clamping)
+	revealedSessions   map[string]bool           // Sessions revealed via search while collapse mode is on
+	hiddenCount        int                       // Number of sessions hidden by collapse mode (for display)
+	hiddenSessionsBtn  *hiddenSessionsButton     // Persistent target for "+N inactive" click area
+	collapseToggle     *collapseToggle           // Persistent target for collapse toggle in settings
 }
 
 // settingsButton is a persistent target for the settings gear icon
 type settingsButton struct{}
+
+// collapseToggle is a persistent target for the collapse toggle in settings dropdown
+type collapseToggle struct{}
 
 // settingsMenuState tracks the settings dropdown
 type settingsMenuState struct {
@@ -76,6 +87,9 @@ type settingsMenuState struct {
 
 // sessionButton is a persistent target for the NEW SESSION button
 type sessionButton struct{}
+
+// hiddenSessionsButton is a persistent target for the "+N inactive" click area
+type hiddenSessionsButton struct{}
 
 // menuOverlay is used to catch clicks outside the context menu
 type menuOverlay struct{}
@@ -131,9 +145,12 @@ func NewControlWindow(application *App) *ControlWindow {
 		tabPanelBg:      &tabPanelBackground{},
 		renameState:     &renameState{},
 		newSessionState: &newSessionState{},
-		newSessionBtn:   &sessionButton{},
-		settingsMenu:    &settingsMenuState{},
-		settingsBtn:     &settingsButton{},
+		newSessionBtn:     &sessionButton{},
+		settingsMenu:     &settingsMenuState{},
+		settingsBtn:      &settingsButton{},
+		revealedSessions:  make(map[string]bool),
+		hiddenSessionsBtn: &hiddenSessionsButton{},
+		collapseToggle:    &collapseToggle{},
 	}
 
 	// Load embedded logo
@@ -165,7 +182,33 @@ func NewControlWindow(application *App) *ControlWindow {
 	win.searchEditor.Submit = false
 
 	// Register scroll callback to bypass Gio's broken event routing on macOS 26.
-	win.window.SetScrollCallback(func(dx, dy float32) {
+	win.window.SetScrollCallback(func(dx, dy, px, py float32) {
+		// If cursor is over the sidebar, scroll the session list.
+		if int(px) < sidebarWidth {
+			delta := int(dy)
+			if delta == 0 {
+				if dy > 0 {
+					delta = 1
+				} else if dy < 0 {
+					delta = -1
+				}
+			}
+			win.tabScrollOffset += delta
+			// Clamp: can't scroll past start
+			if win.tabScrollOffset < 0 {
+				win.tabScrollOffset = 0
+			}
+			// Clamp: can't scroll past end (max = total list height - visible area)
+			maxScroll := win.tabListHeight - (win.lastWindowSize.Y - headerHeight - 60) // 60 = new session button height
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+			if win.tabScrollOffset > maxScroll {
+				win.tabScrollOffset = maxScroll
+			}
+			return
+		}
+
 		if win.selected == "" {
 			return
 		}
@@ -207,9 +250,16 @@ func (w *ControlWindow) Run() error {
 	}
 }
 
-// setSelected updates the selected session and persists it to config
+// setSelected updates the selected session and persists it to config.
+// In collapse mode, selecting a hidden session reveals it in the sidebar.
 func (w *ControlWindow) setSelected(name string) {
 	w.selected = name
+	// If collapse mode is on and this session was hidden, reveal it
+	if w.app.config != nil && w.app.config.GetCollapseInactive() {
+		if !w.app.IsSessionActive(name, 2*time.Hour) {
+			w.revealedSessions[name] = true
+		}
+	}
 	if w.app.config != nil {
 		w.app.config.SetLastSelected(name)
 		w.app.saveConfig()
@@ -260,6 +310,19 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		}
 		if !found {
 			delete(w.termWidgets, name)
+		}
+	}
+	// Clean up stale revealed sessions
+	for name := range w.revealedSessions {
+		found := false
+		for _, s := range sessions {
+			if s == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			delete(w.revealedSessions, name)
 		}
 	}
 
@@ -402,7 +465,7 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 				// Check if click is inside settings dropdown
 				pos := w.settingsMenu.position
 				menuWidth := 260
-				menuHeight := 32
+				menuHeight := 64 // 2 items * 32px
 				clickX, clickY := int(e.Position.X), int(e.Position.Y)
 				inMenu := clickX >= pos.X && clickX <= pos.X+menuWidth &&
 					clickY >= pos.Y && clickY <= pos.Y+menuHeight
@@ -636,7 +699,8 @@ func (w *ControlWindow) layoutSettingsButton(gtx layout.Context, x, y, size int)
 func (w *ControlWindow) layoutSettingsDropdown(gtx layout.Context) {
 	itemHeight := 32
 	menuWidth := 260
-	menuHeight := itemHeight // One item for now
+	numItems := 2
+	menuHeight := itemHeight * numItems
 
 	pos := w.settingsMenu.position
 
@@ -656,7 +720,7 @@ func (w *ControlWindow) layoutSettingsDropdown(gtx layout.Context) {
 		paint.FillShape(gtx.Ops, borderColor, edge.Op())
 	}
 
-	// Toggle item: "Auto-answer Claude menus"
+	// Item 1: "Auto-answer Claude menus"
 	autoMenu := w.app.config != nil && w.app.config.GetClaudeAutoMenu()
 	indicator := "○"
 	if autoMenu {
@@ -664,9 +728,7 @@ func (w *ControlWindow) layoutSettingsDropdown(gtx layout.Context) {
 	}
 	itemLabel := indicator + "  Auto-answer Claude menus"
 
-	// Hit area for the item
 	itemArea := clip.Rect{Max: image.Point{X: menuWidth, Y: itemHeight}}.Push(gtx.Ops)
-	// Use settingsMenu as click target (reusing struct pointer as unique target)
 	event.Op(gtx.Ops, w.settingsMenu)
 	for {
 		ev, ok := gtx.Event(
@@ -685,12 +747,51 @@ func (w *ControlWindow) layoutSettingsDropdown(gtx layout.Context) {
 	}
 	itemArea.Pop()
 
-	// Render text
 	textStack := op.Offset(image.Pt(12, 7)).Push(gtx.Ops)
 	label := material.Label(w.theme, unit.Sp(13), itemLabel)
 	label.Color = color.NRGBA{R: 224, G: 224, B: 224, A: 255}
 	label.Layout(gtx)
 	textStack.Pop()
+
+	// Item 2: "Collapse inactive sessions"
+	collapseOn := w.app.config != nil && w.app.config.GetCollapseInactive()
+	indicator2 := "○"
+	if collapseOn {
+		indicator2 = "✓"
+	}
+	itemLabel2 := indicator2 + "  Collapse inactive sessions"
+
+	item2Stack := op.Offset(image.Pt(0, itemHeight)).Push(gtx.Ops)
+	item2Area := clip.Rect{Max: image.Point{X: menuWidth, Y: itemHeight}}.Push(gtx.Ops)
+	event.Op(gtx.Ops, w.collapseToggle)
+	for {
+		ev, ok := gtx.Event(
+			pointer.Filter{Target: w.collapseToggle, Kinds: pointer.Press},
+		)
+		if !ok {
+			break
+		}
+		if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
+			if w.app.config != nil {
+				newVal := !collapseOn
+				w.app.config.SetCollapseInactive(newVal)
+				w.app.saveConfig()
+				if !newVal {
+					// Turning off collapse: clear revealed sessions
+					w.revealedSessions = make(map[string]bool)
+				}
+			}
+			w.settingsMenu.visible = false
+		}
+	}
+	item2Area.Pop()
+
+	text2Stack := op.Offset(image.Pt(12, 7)).Push(gtx.Ops)
+	label2 := material.Label(w.theme, unit.Sp(13), itemLabel2)
+	label2.Color = color.NRGBA{R: 224, G: 224, B: 224, A: 255}
+	label2.Layout(gtx)
+	text2Stack.Pop()
+	item2Stack.Pop()
 
 	bgStack.Pop()
 }
@@ -727,13 +828,25 @@ func (w *ControlWindow) layoutSidebar(gtx layout.Context) layout.Dimensions {
 	}
 	bgAreaStack.Pop()
 
-	// Get sessions and apply search filter
+	// Get sessions and apply search + collapse filters
 	allSessions := w.app.ListSessions()
+	collapseMode := w.app.config != nil && w.app.config.GetCollapseInactive()
 	var sessions []string
+	w.hiddenCount = 0
 	if w.searchQuery != "" {
+		// Search always searches ALL sessions (ignores collapse)
 		for _, name := range allSessions {
 			if strings.Contains(strings.ToLower(name), w.searchQuery) {
 				sessions = append(sessions, name)
+			}
+		}
+	} else if collapseMode {
+		// Collapse mode: show active sessions, selected session, and revealed sessions
+		for _, name := range allSessions {
+			if w.app.IsSessionActive(name, 2*time.Hour) || name == w.selected || w.revealedSessions[name] {
+				sessions = append(sessions, name)
+			} else {
+				w.hiddenCount++
 			}
 		}
 	} else {
@@ -742,9 +855,14 @@ func (w *ControlWindow) layoutSidebar(gtx layout.Context) layout.Dimensions {
 
 	// Layout sidebar sections vertically
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		// Header section: "SESSIONS (N)"
+		// Header section: "SESSIONS (N)" or "SESSIONS (shown/total)"
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			headerText := fmt.Sprintf("SESSIONS (%d)", len(allSessions))
+			var headerText string
+			if collapseMode && w.hiddenCount > 0 && w.searchQuery == "" {
+				headerText = fmt.Sprintf("SESSIONS (%d/%d)", len(sessions), len(allSessions))
+			} else {
+				headerText = fmt.Sprintf("SESSIONS (%d)", len(allSessions))
+			}
 			label := material.Label(w.theme, unit.Sp(10), headerText)
 			label.Color = color.NRGBA{R: 136, G: 136, B: 136, A: 255}
 			return layout.Inset{Top: unit.Dp(12), Bottom: unit.Dp(12)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -753,6 +871,14 @@ func (w *ControlWindow) layoutSidebar(gtx layout.Context) layout.Dimensions {
 		}),
 		// Session list (scrollable area)
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			visibleHeight := gtx.Constraints.Max.Y
+
+			// Clip to visible area so scrolled-off items don't draw outside
+			clipStack := clip.Rect{Max: image.Point{X: sidebarWidth, Y: visibleHeight}}.Push(gtx.Ops)
+
+			// Apply scroll offset
+			scrollStack := op.Offset(image.Pt(0, -w.tabScrollOffset)).Push(gtx.Ops)
+
 			offsetY := 0
 
 			// Show new session input at the top if active
@@ -784,7 +910,51 @@ func (w *ControlWindow) layoutSidebar(gtx layout.Context) layout.Dimensions {
 				}
 			}
 
-			return layout.Dimensions{Size: image.Point{X: sidebarWidth, Y: gtx.Constraints.Max.Y}}
+			// Show "+N inactive" indicator when collapse mode hides sessions
+			if collapseMode && w.hiddenCount > 0 && w.searchQuery == "" {
+				hiddenHeight := 28
+				stack := op.Offset(image.Pt(0, offsetY)).Push(gtx.Ops)
+
+				// Click area to disable collapse
+				hiddenArea := clip.Rect{Max: image.Point{X: sidebarWidth, Y: hiddenHeight}}.Push(gtx.Ops)
+				event.Op(gtx.Ops, w.hiddenSessionsBtn)
+				for {
+					ev, ok := gtx.Event(
+						pointer.Filter{Target: w.hiddenSessionsBtn, Kinds: pointer.Press},
+					)
+					if !ok {
+						break
+					}
+					if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
+						// Disable collapse mode
+						if w.app.config != nil {
+							w.app.config.SetCollapseInactive(false)
+							w.app.saveConfig()
+						}
+						w.revealedSessions = make(map[string]bool)
+					}
+				}
+				hiddenArea.Pop()
+
+				// Render text
+				hiddenText := fmt.Sprintf("+ %d inactive", w.hiddenCount)
+				textStack := op.Offset(image.Pt(0, 6)).Push(gtx.Ops)
+				label := material.Label(w.theme, unit.Sp(11), hiddenText)
+				label.Color = color.NRGBA{R: 100, G: 100, B: 100, A: 255}
+				layout.Center.Layout(gtx, label.Layout)
+				textStack.Pop()
+
+				stack.Pop()
+				offsetY += hiddenHeight
+			}
+
+			scrollStack.Pop()
+			clipStack.Pop()
+
+			// Track total list height for scroll clamping
+			w.tabListHeight = offsetY
+
+			return layout.Dimensions{Size: image.Point{X: sidebarWidth, Y: visibleHeight}}
 		}),
 		// Footer section: "NEW SESSION" button
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1076,6 +1246,8 @@ func (w *ControlWindow) layoutTerminal(gtx layout.Context) layout.Dimensions {
 			if newCols > 0 && newRows > 0 {
 				state.parser.Resize(newCols, newRows)
 				state.pty.Resize(pty.Size{Cols: uint16(newCols), Rows: uint16(newRows)})
+				// Clear tmux scrollback on all sessions so reflow doesn't replay old content
+				go tmux.ClearAllHistory()
 			}
 		}
 	}
@@ -1401,6 +1573,11 @@ func (w *ControlWindow) confirmRename() {
 		// Update selection to track the renamed session
 		if w.selected == oldName {
 			w.setSelected(newName)
+		}
+		// Transfer revealed status on rename
+		if w.revealedSessions[oldName] {
+			delete(w.revealedSessions, oldName)
+			w.revealedSessions[newName] = true
 		}
 
 		go func() {

@@ -18,10 +18,16 @@ type ClaudeSettings struct {
 	AutoMenu *bool `json:"auto_menu,omitempty"` // Auto-answer numbered menus (default: true)
 }
 
+// UISettings holds UI behavior settings
+type UISettings struct {
+	CollapseInactive *bool `json:"collapse_inactive,omitempty"` // Hide sessions inactive >2h (default: false)
+}
+
 // Config holds application configuration
 type Config struct {
 	Discord             DiscordConfig          `json:"discord"`
 	Claude              ClaudeSettings         `json:"claude,omitempty"`
+	UI                  UISettings             `json:"ui,omitempty"`
 	SessionColors       map[string]int         `json:"session_colors,omitempty"`
 	WindowSizes         map[string][2]int      `json:"window_sizes,omitempty"`
 	Sessions            map[string]SessionInfo `json:"sessions,omitempty"`
@@ -257,6 +263,19 @@ func (c *Config) GetClaudeAutoMenu() bool {
 // SetClaudeAutoMenu sets the auto-menu toggle
 func (c *Config) SetClaudeAutoMenu(enabled bool) {
 	c.Claude.AutoMenu = &enabled
+}
+
+// GetCollapseInactive returns whether inactive session collapse is enabled (default: false)
+func (c *Config) GetCollapseInactive() bool {
+	if c.UI.CollapseInactive == nil {
+		return false
+	}
+	return *c.UI.CollapseInactive
+}
+
+// SetCollapseInactive sets the collapse inactive toggle
+func (c *Config) SetCollapseInactive(enabled bool) {
+	c.UI.CollapseInactive = &enabled
 }
 
 // LoadDefault loads configuration from the default path

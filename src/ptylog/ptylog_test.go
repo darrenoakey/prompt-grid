@@ -213,6 +213,52 @@ func TestRenameLog(t *testing.T) {
 	}
 }
 
+func TestTruncateLog(t *testing.T) {
+	w, err := NewWriter("test-truncate-log")
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	w.Write([]byte("some data that should be cleared"))
+	w.Close()
+
+	// Verify data exists
+	data, err := os.ReadFile(LogPath("test-truncate-log"))
+	if err != nil {
+		t.Fatalf("ReadFile before truncate: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("log should have data before truncate")
+	}
+
+	TruncateLog("test-truncate-log")
+
+	// File should still exist but be empty
+	data, err = os.ReadFile(LogPath("test-truncate-log"))
+	if err != nil {
+		t.Fatalf("ReadFile after truncate: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("log should be empty after truncate, got %d bytes", len(data))
+	}
+
+	// NewWriter should work on truncated file (append mode, size=0)
+	w2, err := NewWriter("test-truncate-log")
+	if err != nil {
+		t.Fatalf("NewWriter after truncate: %v", err)
+	}
+	w2.Write([]byte("new data"))
+	w2.Close()
+
+	data, err = os.ReadFile(LogPath("test-truncate-log"))
+	if err != nil {
+		t.Fatalf("ReadFile after rewrite: %v", err)
+	}
+	if string(data) != "new data" {
+		t.Errorf("log after truncate+write = %q, want %q", data, "new data")
+	}
+	DeleteLog("test-truncate-log")
+}
+
 func TestTruncation(t *testing.T) {
 	w, err := NewWriter("test-truncate")
 	if err != nil {

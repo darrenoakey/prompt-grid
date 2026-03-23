@@ -78,7 +78,8 @@ type SessionState struct {
 	scrollOffset int  // Lines scrolled up from bottom (0 = viewing live terminal)
 	scrollMode   bool // True when user is viewing history (frozen view)
 
-	// Auto-menu cooldown
+	// Activity tracking
+	lastActivity     time.Time // Last time PTY output was received (for collapse mode)
 	lastAutoMenuTime time.Time // Last time auto-menu sent "1" to this session
 
 	// Selection state
@@ -126,6 +127,11 @@ func (s *SessionState) Scrollback() *emulator.Scrollback {
 // Colors returns the session-specific color scheme
 func (s *SessionState) Colors() render.SessionColor {
 	return s.colors
+}
+
+// LastActivity returns the time of the last PTY output.
+func (s *SessionState) LastActivity() time.Time {
+	return s.lastActivity
 }
 
 // PromptStatus returns the current prompt detection status.
@@ -324,6 +330,11 @@ func NewApp(cfg *config.Config, cfgPath string) *App {
 	// Discover and reconnect to existing tmux sessions
 	a.discoverSessions()
 
+	// Clear tmux scrollback on all existing panes immediately after reconnect.
+	// Panes retain their old history-limit from before the restart; this resets
+	// it per-pane to 1 and flushes any accumulated scrollback.
+	tmux.ClearAllHistory()
+
 	// Mark startup complete: any session exit after this point is intentional
 	a.startupComplete = true
 
@@ -332,6 +343,9 @@ func NewApp(cfg *config.Config, cfgPath string) *App {
 
 	// Start background goroutine to detect prompt status
 	a.startPromptDetector()
+
+	// Periodically clear tmux scrollback to prevent history reflow artifacts
+	a.startTmuxHistoryClearer()
 
 	return a
 }
@@ -346,6 +360,19 @@ func (a *App) startCWDUpdater() {
 		defer ticker.Stop()
 		for range ticker.C {
 			a.updateAllCWDs()
+		}
+	}()
+}
+
+// startTmuxHistoryClearer periodically resets tmux's history-limit and clears
+// scrollback for all sessions. tmux's internal scrollback causes old content to
+// reflow onto the visible screen during resize events, appearing as "replayed" output.
+func (a *App) startTmuxHistoryClearer() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			tmux.ClearAllHistory()
 		}
 	}()
 }
@@ -467,6 +494,7 @@ func (a *App) discoverSessions() {
 func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 	state.pty.SetOnData(func(data []byte) {
 		state.screenMu.Lock()
+		state.lastActivity = time.Now()
 		oldCount := state.scrollback.Count()
 		state.parser.Parse(data)
 		// In scroll mode, compensate scrollOffset so the view stays on the same
@@ -518,6 +546,13 @@ func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 
 // reconnectSession connects to an existing tmux session
 func (a *App) reconnectSession(name string) error {
+	// Kill tmux scrollback BEFORE attaching. On attach, tmux dumps its
+	// scrollback + screen through the PTY. Without this, old history floods
+	// the parser and appears as replayed content.
+	// Must set per-pane history-limit first — existing panes retain their old limit.
+	tmux.SetPaneHistoryLimit(name, 1)
+	tmux.ClearHistory(name)
+
 	// Create PTY and attach to tmux session
 	cols := uint16(120)
 	rows := uint16(24)
@@ -533,16 +568,9 @@ func (a *App) reconnectSession(name string) error {
 	}
 	parser := emulator.NewParser(screen, scrollback)
 
-	// Replay saved PTY log to restore screen state.
-	// If the scrollback file already has lines, enable replay mode to avoid
-	// duplicating history that is already persisted on disk.
-	// If the scrollback file is empty (first run or scrollback file absent),
-	// let the replay write lines to disk and the ring normally.
-	if scrollback.Count() > 0 {
-		scrollback.SetReplayMode(true)
-	}
-	ptylog.ReplayLog(name, parser)
-	scrollback.SetReplayMode(false)
+	// Truncate the ptylog — scrollback is persisted in the .scrollback file,
+	// and tmux redraws the current screen on attach, so replay is unnecessary.
+	ptylog.TruncateLog(name)
 
 	// Start PTY log writer
 	logWriter, _ := ptylog.NewWriter(name)
@@ -564,14 +592,15 @@ func (a *App) reconnectSession(name string) error {
 	}
 
 	state := &SessionState{
-		pty:        ptySess,
-		name:       name,
-		sshHost:    sessionInfo.SSHHost,
-		parser:     parser,
-		screen:     screen,
-		scrollback: scrollback,
-		colors:     sessionColor,
-		ptyLog:     logWriter,
+		pty:          ptySess,
+		name:         name,
+		sshHost:      sessionInfo.SSHHost,
+		parser:       parser,
+		screen:       screen,
+		scrollback:   scrollback,
+		colors:       sessionColor,
+		ptyLog:       logWriter,
+		lastActivity: time.Now(),
 	}
 
 	// Connect callbacks
@@ -633,13 +662,9 @@ func (a *App) recreateSession(name string, info config.SessionInfo) error {
 	parser := emulator.NewParser(screen, scrollback)
 
 	// Replay saved PTY log to restore screen state.
-	// If the scrollback file already has lines, enable replay mode to avoid
-	// duplicating history that is already persisted on disk.
-	if scrollback.Count() > 0 {
-		scrollback.SetReplayMode(true)
-	}
-	ptylog.ReplayLog(name, parser)
-	scrollback.SetReplayMode(false)
+	// Truncate the ptylog — scrollback is persisted in the .scrollback file,
+	// and tmux redraws the current screen on attach, so replay is unnecessary.
+	ptylog.TruncateLog(name)
 
 	// Start PTY log writer
 	logWriter, _ := ptylog.NewWriter(name)
@@ -648,14 +673,15 @@ func (a *App) recreateSession(name string, info config.SessionInfo) error {
 	sessionColor := a.resolveSessionColor(name)
 
 	state := &SessionState{
-		pty:        ptySess,
-		name:       name,
-		sshHost:    info.SSHHost,
-		parser:     parser,
-		screen:     screen,
-		scrollback: scrollback,
-		colors:     sessionColor,
-		ptyLog:     logWriter,
+		pty:          ptySess,
+		name:         name,
+		sshHost:      info.SSHHost,
+		parser:       parser,
+		screen:       screen,
+		scrollback:   scrollback,
+		colors:       sessionColor,
+		ptyLog:       logWriter,
+		lastActivity: time.Now(),
 	}
 
 	// Connect callbacks
@@ -750,14 +776,15 @@ func (a *App) NewSession(name, sshHost, workDir string) (*SessionState, error) {
 	sessionColor := a.resolveSessionColor(name)
 
 	state := &SessionState{
-		pty:        ptySess,
-		name:       name,
-		sshHost:    sshHost,
-		parser:     parser,
-		screen:     screen,
-		scrollback: scrollback,
-		colors:     sessionColor,
-		ptyLog:     logWriter,
+		pty:          ptySess,
+		name:         name,
+		sshHost:      sshHost,
+		parser:       parser,
+		screen:       screen,
+		scrollback:   scrollback,
+		colors:       sessionColor,
+		ptyLog:       logWriter,
+		lastActivity: time.Now(),
 	}
 
 	// Connect callbacks
@@ -831,13 +858,14 @@ func (a *App) newSessionWithCommand(name, workDir, command string) (*SessionStat
 	sessionColor := a.resolveSessionColor(name)
 
 	state := &SessionState{
-		pty:        ptySess,
-		name:       name,
-		parser:     parser,
-		screen:     screen,
-		scrollback: scrollback2,
-		colors:     sessionColor,
-		ptyLog:     logWriter,
+		pty:          ptySess,
+		name:         name,
+		parser:       parser,
+		screen:       screen,
+		scrollback:   scrollback2,
+		colors:       sessionColor,
+		ptyLog:       logWriter,
+		lastActivity: time.Now(),
 	}
 
 	// Connect callbacks
@@ -892,6 +920,17 @@ func (a *App) ListSessions() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// IsSessionActive returns true if a session had PTY output within the given duration.
+func (a *App) IsSessionActive(name string, within time.Duration) bool {
+	a.mu.RLock()
+	state := a.sessions[name]
+	a.mu.RUnlock()
+	if state == nil {
+		return false
+	}
+	return time.Since(state.lastActivity) <= within
 }
 
 // detachSession clears the window reference when a standalone window closes.

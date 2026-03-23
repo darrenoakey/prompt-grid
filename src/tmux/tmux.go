@@ -52,7 +52,8 @@ func ConfigureServer() {
 		cmd := exec.Command("tmux",
 			"-L", ServerName(),
 			"set-option", "-g", "status", "off", ";",
-			"set-option", "-g", "prefix", "None",
+			"set-option", "-g", "prefix", "None", ";",
+			"set-option", "-g", "history-limit", "1",
 		)
 		cmd.Run() // best-effort
 	})
@@ -144,6 +145,30 @@ func KillSession(name string) error {
 		return fmt.Errorf("tmux kill-session failed: %w: %s", err, out)
 	}
 	return nil
+}
+
+// SetPaneHistoryLimit sets the history-limit for an existing pane.
+// The global history-limit only affects new panes; this overrides per-pane.
+func SetPaneHistoryLimit(name string, limit int) {
+	exec.Command("tmux", "-L", ServerName(), "set-option", "-t", name, "-p", "history-limit", fmt.Sprintf("%d", limit)).Run()
+}
+
+// ClearHistory clears the scrollback history for a tmux session's pane.
+func ClearHistory(name string) {
+	exec.Command("tmux", "-L", ServerName(), "clear-history", "-t", name).Run() // best-effort
+}
+
+// ClearAllHistory sets history-limit to 1 (per-pane and globally) and clears
+// scrollback for every session. The per-pane set is required because the global
+// setting only affects new panes — existing panes retain their original limit.
+func ClearAllHistory() {
+	server := ServerName()
+	exec.Command("tmux", "-L", server, "set-option", "-g", "history-limit", "1").Run()
+	names, _ := ListSessions()
+	for _, name := range names {
+		exec.Command("tmux", "-L", server, "set-option", "-t", name, "-p", "history-limit", "1").Run()
+		exec.Command("tmux", "-L", server, "clear-history", "-t", name).Run()
+	}
 }
 
 // RenameSession renames a tmux session

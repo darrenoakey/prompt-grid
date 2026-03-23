@@ -15,6 +15,7 @@ import (
 
 	"prompt-grid/src/pty"
 	"prompt-grid/src/render"
+	"prompt-grid/src/tmux"
 )
 
 // Window counter for positioning
@@ -61,7 +62,7 @@ func NewTerminalWindow(application *App, state *SessionState) *TerminalWindow {
 	win.widget = NewTerminalWidget(state, state.Colors(), application.FontSize(), win.shaper)
 
 	// Register scroll callback to bypass Gio's broken event routing on macOS 26.
-	win.window.SetScrollCallback(func(dx, dy float32) {
+	win.window.SetScrollCallback(func(dx, dy, _, _ float32) {
 		delta := int(dy / 3)
 		if delta == 0 {
 			if dy > 0 {
@@ -111,6 +112,8 @@ func (w *TerminalWindow) Run() error {
 					if newCols > 0 && newRows > 0 {
 						w.state.parser.Resize(newCols, newRows)
 						w.state.pty.Resize(pty.Size{Cols: uint16(newCols), Rows: uint16(newRows)})
+						// Clear tmux scrollback on all sessions so reflow doesn't replay old content
+						go tmux.ClearAllHistory()
 					}
 				}
 			}
