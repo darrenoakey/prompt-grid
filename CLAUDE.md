@@ -40,6 +40,7 @@ macOS runners work out of the box (Xcode CLT pre-installed, handles ObjC CGO in 
 - `src/logging/` - JSONL logging with dated directories
 - `src/ipc/` - IPC server/client for session requests
 - `src/memwatch/` - Memory watchdog (2GB crash with diagnostic dump)
+- `src/trace/` - JSONL trace recorder for debugging render issues
 
 ### tmux-Based Session Architecture (Survives Restart)
 Sessions are managed by tmux via a dedicated server (`tmux -L prompt-grid`):
@@ -115,11 +116,20 @@ tmux wrapper (`src/tmux/tmux.go`):
 - `screenMu sync.RWMutex` - protects parser/screen/scrollback/scrollOffset from concurrent access
 - Accessors: `PTY()`, `Name()`, `IsSSH()`, `SSHHost()`, `LockScreen()`, `UnlockScreen()`
 
+### Double-Buffered PTY Rendering
+PTY data is double-buffered to prevent intermediate screen states from being visible:
+- `OnData` callback buffers raw bytes in `SessionState.pendingData` (under `pendingMu`)
+- `drainPendingData()` parses the entire buffer in one batch under `screenMu.Lock()`
+- Called at start of each Gio frame (`TerminalWidget.Layout()`), in prompt detector, and in `LockScreen()`
+- **Why**: Apps like Claude Code send full-screen redraws (`\x1b[H\x1b[J` + 50-950KB repaint) after keystrokes. Without buffering, the render thread could see the cleared screen between PTY reads. With buffering, only the final state is ever rendered.
+- PTY log (`ptylog.Write`) still writes immediately in `OnData` for persistence
+- Scroll offset compensation for scroll mode happens during drain, not in callback
+
 ### Thread Safety (screenMu)
-- PTY `OnData` callback takes `screenMu.Lock()` around parser/scrollback/scrollOffset writes
+- `drainPendingData()` takes `screenMu.Lock()` to parse buffered PTY data (called from Gio thread, prompt detector, Discord via `LockScreen()`)
 - Gio render thread takes `screenMu.RLock()` for the entire render phase (after `handleInput`, before `renderBackToBottom`)
-- Discord streamer `captureSnapshot` takes `screenMu.RLock()` via `LockScreen()`/`UnlockScreen()`
-- Prompt detector takes `screenMu.RLock()` around `Screen()` + `detectPromptStatus()` + `detectClaudeMenu()`
+- Discord streamer `captureSnapshot` takes `screenMu.RLock()` via `LockScreen()`/`UnlockScreen()` — `LockScreen()` calls `drainPendingData()` first
+- Prompt detector calls `drainPendingData()` then takes `screenMu.RLock()` around `Screen()` + `detectPromptStatus()` + `detectClaudeMenu()`
 - `AdjustScrollOffset()` and `ScrollToBottom()` take `screenMu.Lock()` (called from Gio thread only)
 - `handleInput()` runs BEFORE the read lock so scroll adjustments don't deadlock
 
@@ -303,6 +313,15 @@ Rename sessions:
 - Persisted in config as `claude.auto_menu` (default: true)
 - `lastAutoMenuTime` on `SessionState` prevents rapid-fire re-sends
 
+### Trace Mode (Debug Recording)
+- TRACE button in control center header, between search bar and settings gear
+- Records JSONL events to `~/.config/prompt-grid/traces/trace-YYYYMMDD-HHMMSS.jsonl`
+- Event types: `start` (session/size), `stop`, `pty_data` (base64 raw bytes), `key_edit`, `key_press`, `scroll`, `paste`, `screen` (text snapshots at start/stop)
+- `App.tracer` + `App.traceSession` protected by `traceMu sync.RWMutex`
+- Hot path (PTY callback) takes only `traceMu.RLock()` — minimal overhead when not tracing
+- Button visual: dim gray "TRACE" when off, bright red "● REC" on dark red pill when on
+- Traces whichever session is selected when clicked; click again to stop
+
 ### Memory Safeguards
 - **Scrollback cap**: 10K lines per session (~416 screens), oldest chunks trimmed (`src/emulator/scrollback.go`). Reduced from 100K to prevent OOM — 29 sessions × 10K × 120 cols × 16 bytes ≈ 556MB
 - **Parser caps**: intermediate string (64B), OSC string (64KB) — resets to ground on overflow
@@ -315,7 +334,7 @@ Rename sessions:
 - **Memory watchdog** (`src/memwatch/`): checks HeapAlloc every 10s, logs stats every 5min, crashes with diagnostic dump at 2GB (exit code 2). Dump includes: MemStats, goroutine stacks, heap profile, per-session scrollback counts, allocation rate history. Dump written to `~/.config/prompt-grid/memdump-{timestamp}.log`.
 
 ## Testing
-185 tests covering emulator, PTY, PTY log persistence, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes, session metadata persistence, session recreation after reboot, CWD tracking, claude --continue on recreate, prompt detection, Claude menu detection, Discord streamer activation/deactivation/timeout, activity tracking, collapse filtering.
+187 tests covering emulator, PTY, PTY log persistence, rendering, tmux lifecycle, GUI state/behavior, memory watchdog, rename flow, color contrast, color persistence, pop-out/callback, window sizes, session metadata persistence, session recreation after reboot, CWD tracking, claude --continue on recreate, prompt detection, Claude menu detection, Discord streamer activation/deactivation/timeout, activity tracking, collapse filtering, trace recording.
 
 ### Test Isolation with Realms
 - `CLAUDE_TERM_REALM` env var namespaces tmux server name and socket directories
