@@ -20,6 +20,7 @@ import (
 
 	"prompt-grid/src/emulator"
 	"prompt-grid/src/render"
+	"prompt-grid/src/trace"
 )
 
 // TerminalWidget is a Gio widget that displays a terminal session
@@ -61,6 +62,11 @@ func NewTerminalWidget(state *SessionState, colors render.SessionColor, fontSize
 func (w *TerminalWidget) Layout(gtx layout.Context) layout.Dimensions {
 	// Padding around content
 	padding := 8
+
+	// Drain all buffered PTY data in one batch before rendering.
+	// This is the double-buffer mechanism: intermediate screen states
+	// (e.g., screen cleared mid-redraw) are never visible to the user.
+	w.state.drainPendingData()
 
 	// Handle input first (may modify scrollOffset via AdjustScrollOffset).
 	// This runs on the Gio main thread before we take the read lock.
@@ -169,6 +175,7 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 				// Positive delta = scroll down (toward live) = decrease offset.
 				// Negative delta = scroll up (toward history) = increase offset.
 				w.state.AdjustScrollOffset(-delta)
+				w.state.traceEvent(trace.Event{Type: "scroll", Delta: -delta})
 				// Request another frame so continued scrolling is responsive.
 				gtx.Execute(op.InvalidateCmd{})
 
@@ -262,7 +269,9 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 				// Clear selection on any text input
 				w.state.ClearSelection()
 				if len(e.Text) > 0 {
+					w.state.traceEvent(trace.Event{Type: "key_edit", Text: e.Text})
 					w.state.pty.Write([]byte(e.Text))
+					w.state.TouchActivity()
 				}
 			case key.Event:
 				if e.State == key.Press {
@@ -294,10 +303,13 @@ func (w *TerminalWidget) handleInput(gtx layout.Context) {
 					} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "V" {
 						// Cmd+V: paste via pbpaste so any MIME type works and clipboard is never altered.
 						ptySess := w.state.pty
+						state := w.state
 						go func() {
 							out, err := exec.Command("pbpaste").Output()
 							if err == nil && len(out) > 0 {
+								state.traceEvent(trace.Event{Type: "paste", Text: string(out)})
 								ptySess.Write(out)
+								state.TouchActivity()
 							}
 						}()
 					} else {
@@ -370,7 +382,9 @@ func (w *TerminalWidget) handleKeyEvent(e key.Event) {
 	}
 
 	if len(data) > 0 {
+		w.state.traceEvent(trace.Event{Type: "key_press", Key: string(e.Name), Mods: e.Modifiers.String()})
 		w.state.pty.Write(data)
+		w.state.TouchActivity()
 	}
 }
 

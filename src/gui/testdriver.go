@@ -173,6 +173,7 @@ func (d *TestDriver) GetScreenContent(sessionName string) [][]rune {
 	if state == nil {
 		return nil
 	}
+	state.drainPendingData()
 	cols, rows := state.Screen().Size()
 	content := make([][]rune, rows)
 	for y := 0; y < rows; y++ {
@@ -208,6 +209,7 @@ func (d *TestDriver) GetCell(sessionName string, x, y int) emulator.Cell {
 	if state == nil {
 		return emulator.Cell{}
 	}
+	state.drainPendingData()
 	return state.Screen().Cell(x, y)
 }
 
@@ -217,6 +219,7 @@ func (d *TestDriver) GetCursorPosition(sessionName string) (x, y int) {
 	if state == nil {
 		return 0, 0
 	}
+	state.drainPendingData()
 	cursor := state.Screen().Cursor()
 	return cursor.X, cursor.Y
 }
@@ -236,6 +239,7 @@ func (d *TestDriver) GetScrollbackCount(sessionName string) int {
 	if state == nil {
 		return 0
 	}
+	state.drainPendingData()
 	return state.scrollback.Count()
 }
 
@@ -513,6 +517,7 @@ func (d *TestDriver) GetScrollbackLine(sessionName string, index int) string {
 	if state == nil {
 		return ""
 	}
+	state.drainPendingData()
 	line := state.scrollback.Line(index)
 	if line == nil {
 		return ""
@@ -534,6 +539,7 @@ func (d *TestDriver) GetScrollbackRange(sessionName string, start, end int) []st
 	if state == nil {
 		return nil
 	}
+	state.drainPendingData()
 	lines := state.scrollback.Lines(start, end)
 	result := make([]string, len(lines))
 	for i, line := range lines {

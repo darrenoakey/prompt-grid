@@ -790,7 +790,7 @@ func TestCollapse_HeaderShowsCount(t *testing.T) {
 	}
 }
 
-// Scenario: Activity persists across restart
+// Scenario: Activity persists across restart with relative normalization
 func TestCollapse_ActivityPersistsAcrossRestart(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.json")
@@ -798,61 +798,82 @@ func TestCollapse_ActivityPersistsAcrossRestart(t *testing.T) {
 
 	app1 := NewApp(cfg, cfgPath)
 
-	_, err := app1.NewSession("bdd-persist", "", "")
+	// Create two sessions: one recent, one stale
+	_, err := app1.NewSession("bdd-persist-recent", "", "")
 	if err != nil {
-		t.Fatalf("NewSession: %v", err)
+		t.Fatalf("NewSession recent: %v", err)
+	}
+	_, err = app1.NewSession("bdd-persist-stale", "", "")
+	if err != nil {
+		t.Fatalf("NewSession stale: %v", err)
 	}
 
-	// Backdate and save activity
-	threeHoursAgo := time.Now().Add(-3 * time.Hour)
-	app1.GetSession("bdd-persist").lastActivity = threeHoursAgo
+	// Set activity: recent = 10 min ago, stale = 3 hours ago
+	app1.GetSession("bdd-persist-recent").lastActivity = time.Now().Add(-10 * time.Minute)
+	app1.GetSession("bdd-persist-stale").lastActivity = time.Now().Add(-3 * time.Hour)
 	app1.saveAllActivityTimes()
-
-	// Verify it's in config
-	info, ok := cfg.GetSessionInfo("bdd-persist")
-	if !ok {
-		t.Fatal("session info should exist")
-	}
-	if info.LastActivity == 0 {
-		t.Fatal("LastActivity should be persisted")
-	}
-	if time.Unix(info.LastActivity, 0).Sub(threeHoursAgo).Abs() > time.Second {
-		t.Errorf("persisted activity = %v, want ~%v", time.Unix(info.LastActivity, 0), threeHoursAgo)
-	}
-
-	// Save config to disk
 	cfg.Save(cfgPath)
 
-	// Simulate app exit (nil the OnExit to prevent cleanup)
-	app1.GetSession("bdd-persist").pty.SetOnExit(nil)
-	tmux.KillSession("bdd-persist")
+	// Simulate app exit
+	app1.GetSession("bdd-persist-recent").pty.SetOnExit(nil)
+	app1.GetSession("bdd-persist-stale").pty.SetOnExit(nil)
+	tmux.KillSession("bdd-persist-recent")
+	tmux.KillSession("bdd-persist-stale")
 	time.Sleep(200 * time.Millisecond)
 
-	// Reload config and create new app (simulates restart)
+	// Reload config and recreate tmux sessions
 	cfg2, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-
-	// Recreate the tmux session so the new app can reconnect
-	tmux.NewSession("bdd-persist", "", 120, 24)
+	cfg2.SetCollapseInactive(true)
+	tmux.NewSession("bdd-persist-recent", "", 120, 24)
+	tmux.NewSession("bdd-persist-stale", "", 120, 24)
 	t.Cleanup(func() {
-		tmux.KillSession("bdd-persist")
+		tmux.KillSession("bdd-persist-recent")
+		tmux.KillSession("bdd-persist-stale")
 		time.Sleep(100 * time.Millisecond)
 	})
 
 	app2 := NewApp(cfg2, cfgPath)
-	t.Cleanup(func() { app2.CloseSession("bdd-persist"); time.Sleep(100 * time.Millisecond) })
+	t.Cleanup(func() {
+		app2.CloseSession("bdd-persist-recent")
+		app2.CloseSession("bdd-persist-stale")
+		time.Sleep(100 * time.Millisecond)
+	})
 
-	state2 := app2.GetSession("bdd-persist")
-	if state2 == nil {
-		t.Fatal("session should be reconnected")
+	// After normalization: recent session should be ~now (active),
+	// stale session should be ~2h50m ago (still stale)
+	recent := app2.GetSession("bdd-persist-recent")
+	stale := app2.GetSession("bdd-persist-stale")
+	if recent == nil || stale == nil {
+		t.Fatal("both sessions should be reconnected")
 	}
 
-	// The lastActivity should be the persisted value (~3 hours ago), NOT time.Now()
-	elapsed := time.Since(state2.LastActivity())
-	if elapsed < 2*time.Hour {
-		t.Errorf("lastActivity should be ~3h ago after restart, but elapsed = %v (value: %v)", elapsed, state2.LastActivity())
+	// Recent session: normalized to ~now, should be active
+	if !app2.IsSessionActive("bdd-persist-recent", 2*time.Hour) {
+		t.Errorf("recent session should be active after normalization, elapsed=%v", time.Since(recent.LastActivity()))
+	}
+
+	// Stale session: ~2h50m gap preserved, should still be stale
+	if app2.IsSessionActive("bdd-persist-stale", 2*time.Hour) {
+		t.Errorf("stale session should still be stale after normalization, elapsed=%v", time.Since(stale.LastActivity()))
+	}
+
+	// FilteredSessions should show recent, hide stale
+	visible, hidden := app2.FilteredSessions("", "bdd-persist-recent", nil)
+	if hidden < 1 {
+		t.Errorf("should have at least 1 hidden, got %d (visible=%v)", hidden, visible)
+	}
+	visSet := map[string]bool{}
+	for _, v := range visible {
+		visSet[v] = true
+	}
+	if !visSet["bdd-persist-recent"] {
+		t.Error("recent session should be visible")
+	}
+	if visSet["bdd-persist-stale"] {
+		t.Error("stale session should be hidden")
 	}
 }
 
@@ -989,30 +1010,48 @@ func TestCollapse_IsSessionActiveEdgeCases(t *testing.T) {
 	}
 }
 
-// Scenario: PTY output updates lastActivity after startup
-func TestCollapse_OutputUpdatesActivity(t *testing.T) {
+// Scenario: User input (TouchActivity) updates lastActivity
+func TestCollapse_TouchActivityUpdates(t *testing.T) {
 	app := NewApp(nil, "")
 
-	state, err := app.NewSession("bdd-output", "", "")
+	state, err := app.NewSession("bdd-touch", "", "")
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
-	t.Cleanup(func() { app.CloseSession("bdd-output"); time.Sleep(100 * time.Millisecond) })
+	t.Cleanup(func() { app.CloseSession("bdd-touch"); time.Sleep(100 * time.Millisecond) })
 
-	// Wait for shell output to settle
-	time.Sleep(500 * time.Millisecond)
-
+	// New session starts with time.Now()
 	activityBefore := state.LastActivity()
 	time.Sleep(10 * time.Millisecond)
-	tmux.SendKeys("bdd-output", "echo hello", "Enter")
 
-	// Poll for activity update
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if state.LastActivity().After(activityBefore) {
-			return // success
-		}
-		time.Sleep(50 * time.Millisecond)
+	// Simulate user input
+	state.TouchActivity()
+
+	if !state.LastActivity().After(activityBefore) {
+		t.Error("lastActivity should be updated after TouchActivity")
 	}
-	t.Error("lastActivity should be updated after PTY output")
+}
+
+// Scenario: PTY output alone does NOT update lastActivity (prevents stale sessions from appearing active)
+func TestCollapse_OutputDoesNotUpdateActivity(t *testing.T) {
+	app := NewApp(nil, "")
+
+	state, err := app.NewSession("bdd-no-output", "", "")
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	t.Cleanup(func() { app.CloseSession("bdd-no-output"); time.Sleep(100 * time.Millisecond) })
+
+	// Backdate activity
+	state.lastActivity = time.Now().Add(-3 * time.Hour)
+	activityBefore := state.LastActivity()
+
+	// Trigger PTY output
+	tmux.SendKeys("bdd-no-output", "echo hello", "Enter")
+	time.Sleep(500 * time.Millisecond)
+
+	// lastActivity should NOT have been updated by the output
+	if state.LastActivity().After(activityBefore) {
+		t.Error("PTY output should not update lastActivity (only user input should)")
+	}
 }

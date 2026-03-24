@@ -32,6 +32,7 @@ import (
 	"prompt-grid/src/pty"
 	"prompt-grid/src/render"
 	"prompt-grid/src/tmux"
+	"prompt-grid/src/trace"
 )
 
 const sidebarWidth = 240
@@ -65,13 +66,18 @@ type ControlWindow struct {
 	newSessionBtn    *sessionButton            // "NEW SESSION" button target
 	settingsMenu       *settingsMenuState        // Settings gear dropdown
 	settingsBtn        *settingsButton           // Persistent target for gear icon
+	traceBtn           *traceButton              // Persistent target for trace button
 	tabScrollOffset    int                       // Pixel offset for session list scrolling
 	tabListHeight      int                       // Total height of all session tabs (for clamping)
+	searchFocused      bool                      // True when search editor has keyboard focus
 	revealedSessions   map[string]bool           // Sessions revealed via search while collapse mode is on
 	hiddenCount        int                       // Number of sessions hidden by collapse mode (for display)
 	hiddenSessionsBtn  *hiddenSessionsButton     // Persistent target for "+N inactive" click area
 	sessionsHeader     *sessionsHeaderBtn        // Persistent target for SESSIONS header click (toggle collapse)
 }
+
+// traceButton is a persistent target for the Trace button
+type traceButton struct{}
 
 // settingsButton is a persistent target for the settings gear icon
 type settingsButton struct{}
@@ -149,6 +155,7 @@ func NewControlWindow(application *App) *ControlWindow {
 		newSessionBtn:     &sessionButton{},
 		settingsMenu:     &settingsMenuState{},
 		settingsBtn:      &settingsButton{},
+		traceBtn:         &traceButton{},
 		revealedSessions:  make(map[string]bool),
 		hiddenSessionsBtn: &hiddenSessionsButton{},
 		sessionsHeader:    &sessionsHeaderBtn{},
@@ -364,11 +371,26 @@ func (w *ControlWindow) layout(gtx layout.Context) {
 		}
 	}
 
-	// Handle keyboard input: rename handler OR new session handler OR terminal forwarding
+	// Handle keyboard input: rename handler OR new session handler OR search OR terminal forwarding
 	if w.renameState.active {
 		w.handleRenameInput(gtx)
 	} else if w.newSessionState.active {
 		w.handleNewSessionInput(gtx)
+	} else if w.searchFocused {
+		// Search editor has focus — don't steal it with terminal keyboard handler.
+		// Escape exits search focus and clears the query.
+		for {
+			ev, ok := gtx.Event(key.Filter{Name: key.NameEscape})
+			if !ok {
+				break
+			}
+			if e, ok := ev.(key.Event); ok && e.State == key.Press {
+				w.searchEditor.SetText("")
+				w.searchQuery = ""
+				w.searchFocused = false
+				w.focusTerminal = true
+			}
+		}
 	} else {
 		w.handleTerminalKeyboard(gtx)
 	}
@@ -557,6 +579,13 @@ func (w *ControlWindow) layoutHeader(gtx layout.Context) layout.Dimensions {
 	w.layoutSearchBar(searchGtx)
 	searchStack.Pop()
 
+	// Trace button: left of settings gear
+	traceW := 64
+	traceH := 24
+	traceX := gtx.Constraints.Max.X - 280
+	traceY := (headerHeight - traceH) / 2
+	w.layoutTraceButton(gtx, traceX, traceY, traceW, traceH)
+
 	// Settings gear button: left of Discord status
 	gearSize := 24
 	gearX := gtx.Constraints.Max.X - 200 // Left of Discord status area
@@ -618,6 +647,23 @@ func (w *ControlWindow) layoutSearchBar(gtx layout.Context) layout.Dimensions {
 		paint.FillShape(gtx.Ops, borderColor, edge.Op())
 	}
 
+	// Click anywhere on search bar to focus it
+	searchClickArea := clip.Rect{Max: image.Point{X: gtx.Constraints.Max.X, Y: searchHeight}}.Push(gtx.Ops)
+	event.Op(gtx.Ops, &w.searchEditor)
+	for {
+		ev, ok := gtx.Event(
+			pointer.Filter{Target: &w.searchEditor, Kinds: pointer.Press},
+		)
+		if !ok {
+			break
+		}
+		if _, ok := ev.(pointer.Event); ok {
+			w.searchFocused = true
+			gtx.Execute(key.FocusCmd{Tag: &w.searchEditor})
+		}
+	}
+	searchClickArea.Pop()
+
 	// Layout editor
 	editorStyle := material.Editor(w.theme, &w.searchEditor, "Search sessions...")
 	editorStyle.Color = color.NRGBA{R: 224, G: 224, B: 224, A: 255}
@@ -669,6 +715,65 @@ func (w *ControlWindow) layoutDiscordStatusHeader(gtx layout.Context) layout.Dim
 	)
 }
 
+func (w *ControlWindow) layoutTraceButton(gtx layout.Context, x, y, btnW, btnH int) {
+	tracing := w.app.IsTracing()
+
+	stack := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
+
+	// Background pill
+	bgColor := color.NRGBA{R: 50, G: 50, B: 50, A: 255}
+	if tracing {
+		bgColor = color.NRGBA{R: 140, G: 20, B: 20, A: 255}
+	}
+	rr := clip.UniformRRect(image.Rectangle{Max: image.Point{X: btnW, Y: btnH}}, 4)
+	rrOp := rr.Op(gtx.Ops)
+	paint.FillShape(gtx.Ops, bgColor, rrOp)
+
+	// Hit area
+	area := clip.Rect{Max: image.Point{X: btnW, Y: btnH}}.Push(gtx.Ops)
+	event.Op(gtx.Ops, w.traceBtn)
+	for {
+		ev, ok := gtx.Event(
+			pointer.Filter{Target: w.traceBtn, Kinds: pointer.Press},
+		)
+		if !ok {
+			break
+		}
+		if e, ok := ev.(pointer.Event); ok && e.Kind == pointer.Press {
+			go w.toggleTrace()
+		}
+	}
+	area.Pop()
+
+	// Label
+	labelText := "TRACE"
+	labelColor := color.NRGBA{R: 120, G: 120, B: 120, A: 255}
+	if tracing {
+		labelText = "\u25cf REC"
+		labelColor = color.NRGBA{R: 255, G: 80, B: 80, A: 255}
+	}
+	textStack := op.Offset(image.Pt(8, 4)).Push(gtx.Ops)
+	label := material.Label(w.theme, unit.Sp(11), labelText)
+	label.Color = labelColor
+	label.Layout(gtx)
+	textStack.Pop()
+
+	stack.Pop()
+}
+
+func (w *ControlWindow) toggleTrace() {
+	if w.app.IsTracing() {
+		w.app.StopTrace()
+	} else {
+		selected := w.selected
+		if selected == "" {
+			return
+		}
+		w.app.StartTrace(selected)
+	}
+	w.window.Invalidate()
+}
+
 func (w *ControlWindow) layoutSettingsButton(gtx layout.Context, x, y, size int) {
 	stack := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
 
@@ -689,9 +794,9 @@ func (w *ControlWindow) layoutSettingsButton(gtx layout.Context, x, y, size int)
 	}
 	area.Pop()
 
-	// Render gear icon as "⚙" text
-	label := material.Label(w.theme, unit.Sp(18), "⚙")
-	label.Color = color.NRGBA{R: 160, G: 160, B: 160, A: 255}
+	// Render gear icon as text (⚙ not in embedded fonts)
+	label := material.Label(w.theme, unit.Sp(11), "SET")
+	label.Color = color.NRGBA{R: 120, G: 120, B: 120, A: 255}
 	label.Layout(gtx)
 
 	stack.Pop()
@@ -825,6 +930,7 @@ func (w *ControlWindow) layoutSidebar(gtx layout.Context) layout.Dimensions {
 							w.revealedSessions = make(map[string]bool)
 						}
 					}
+					w.window.Invalidate()
 				}
 			}
 			clickArea.Pop()
@@ -902,6 +1008,7 @@ func (w *ControlWindow) layoutSidebar(gtx layout.Context) layout.Dimensions {
 							w.app.saveConfig()
 						}
 						w.revealedSessions = make(map[string]bool)
+						w.window.Invalidate()
 					}
 				}
 				hiddenArea.Pop()
@@ -1829,7 +1936,9 @@ func (w *ControlWindow) handleTerminalKeyboard(gtx layout.Context) {
 		case key.EditEvent:
 			state.ClearSelection()
 			if len(e.Text) > 0 {
+				state.traceEvent(trace.Event{Type: "key_edit", Text: e.Text})
 				state.pty.Write([]byte(e.Text))
+				state.TouchActivity()
 			}
 		case key.Event:
 			if e.State == key.Press {
@@ -1861,9 +1970,11 @@ func (w *ControlWindow) handleTerminalKeyboard(gtx layout.Context) {
 				} else if e.Modifiers.Contain(key.ModCommand) && e.Name == "V" {
 					// Cmd+V: paste via pbpaste so any MIME type works and clipboard is never altered.
 					ptySess := state.pty
+					s := state
 					go func() {
 						out, err := exec.Command("pbpaste").Output()
 						if err == nil && len(out) > 0 {
+							s.traceEvent(trace.Event{Type: "paste", Text: string(out)})
 							ptySess.Write(out)
 						}
 					}()
@@ -1931,7 +2042,9 @@ func (w *ControlWindow) forwardKeyToSession(state *SessionState, e key.Event) {
 	}
 
 	if len(data) > 0 {
+		state.traceEvent(trace.Event{Type: "key_press", Key: string(e.Name), Mods: e.Modifiers.String()})
 		state.pty.Write(data)
+		state.TouchActivity()
 	}
 }
 

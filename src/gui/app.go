@@ -19,6 +19,7 @@ import (
 	"prompt-grid/src/ptylog"
 	"prompt-grid/src/render"
 	"prompt-grid/src/tmux"
+	"prompt-grid/src/trace"
 )
 
 // ErrSessionNotFound is returned when a session is not found
@@ -50,6 +51,11 @@ type App struct {
 
 	observersMu sync.RWMutex
 	observers   []SessionLifecycleObserver
+
+	// Trace support
+	traceMu      sync.RWMutex
+	tracer       *trace.Tracer
+	traceSession string
 }
 
 // SelectionPoint represents a position in the terminal
@@ -59,6 +65,7 @@ type SelectionPoint struct {
 
 // SessionState holds state for a single session
 type SessionState struct {
+	app        *App // Back-reference for tracing
 	pty        *pty.Session
 	name       string
 	sshHost    string
@@ -79,8 +86,14 @@ type SessionState struct {
 	scrollMode   bool // True when user is viewing history (frozen view)
 
 	// Activity tracking
-	lastActivity     time.Time // Last time PTY output was received (for collapse mode)
+	lastActivity     time.Time // Last time user interacted with session (typing/Discord, for collapse mode)
 	lastAutoMenuTime time.Time // Last time auto-menu sent "1" to this session
+
+	// Double-buffer: PTY data is buffered here and parsed all-at-once on the
+	// next Gio frame. This prevents intermediate screen states (e.g., cleared
+	// screen mid-redraw) from ever being visible.
+	pendingMu   sync.Mutex
+	pendingData []byte
 
 	// Selection state
 	selStart     SelectionPoint
@@ -129,9 +142,49 @@ func (s *SessionState) Colors() render.SessionColor {
 	return s.colors
 }
 
-// LastActivity returns the time of the last PTY output.
+// drainPendingData parses all buffered PTY data in a single batch.
+// Called before rendering (Gio frame) and before screen reads (prompt detector,
+// Discord streamer). This is the double-buffer mechanism: PTY data is buffered
+// in OnData and parsed here, so intermediate states (screen cleared mid-redraw)
+// are never visible.
+func (s *SessionState) drainPendingData() {
+	s.pendingMu.Lock()
+	data := s.pendingData
+	s.pendingData = nil
+	s.pendingMu.Unlock()
+
+	if len(data) == 0 {
+		return
+	}
+
+	s.screenMu.Lock()
+	oldCount := s.scrollback.Count()
+	s.parser.Parse(data)
+	if s.scrollMode {
+		newCount := s.scrollback.Count()
+		if delta := newCount - oldCount; delta > 0 {
+			s.scrollOffset += delta
+		}
+	}
+	s.ResetScrollOffset()
+	s.screenMu.Unlock()
+}
+
+// traceEvent logs a trace event if this session is being traced.
+func (s *SessionState) traceEvent(ev trace.Event) {
+	if s.app != nil {
+		s.app.traceEvent(s.name, ev)
+	}
+}
+
+// LastActivity returns the time of the last user interaction.
 func (s *SessionState) LastActivity() time.Time {
 	return s.lastActivity
+}
+
+// TouchActivity marks this session as recently interacted with.
+func (s *SessionState) TouchActivity() {
+	s.lastActivity = time.Now()
 }
 
 // PromptStatus returns the current prompt detection status.
@@ -194,6 +247,7 @@ func (s *SessionState) InScrollMode() bool {
 // LockScreen takes a read lock on the screen/scrollback state.
 // Use when reading screen content from a non-Gio goroutine (e.g., Discord streamer).
 func (s *SessionState) LockScreen() {
+	s.drainPendingData()
 	s.screenMu.RLock()
 }
 
@@ -330,6 +384,11 @@ func NewApp(cfg *config.Config, cfgPath string) *App {
 	// Discover and reconnect to existing tmux sessions
 	a.discoverSessions()
 
+	// Shift all activity timestamps so the most recent = now.
+	// This preserves relative ordering: if 4 sessions were visible before
+	// shutdown, the same 4 will be visible after restart.
+	a.normalizeActivityTimes()
+
 	// Clear tmux scrollback on all existing panes immediately after reconnect.
 	// Panes retain their old history-limit from before the restart; this resets
 	// it per-pane to 1 and flushes any accumulated scrollback.
@@ -348,6 +407,42 @@ func NewApp(cfg *config.Config, cfgPath string) *App {
 	a.startTmuxHistoryClearer()
 
 	return a
+}
+
+// normalizeActivityTimes shifts all session lastActivity timestamps forward so
+// that the most recently active session has lastActivity = now. This preserves
+// relative ordering across restarts: if 4 sessions were visible before shutdown,
+// the same 4 will be visible after startup.
+func (a *App) normalizeActivityTimes() {
+	a.mu.RLock()
+	if len(a.sessions) == 0 {
+		a.mu.RUnlock()
+		return
+	}
+	var maxActivity time.Time
+	for _, state := range a.sessions {
+		if state.lastActivity.After(maxActivity) {
+			maxActivity = state.lastActivity
+		}
+	}
+	a.mu.RUnlock()
+
+	// If no session had persisted activity, nothing to shift
+	if maxActivity.IsZero() {
+		return
+	}
+
+	// delta = now - maxActivity; add delta to all timestamps
+	now := time.Now()
+	delta := now.Sub(maxActivity)
+
+	a.mu.RLock()
+	for _, state := range a.sessions {
+		if !state.lastActivity.IsZero() {
+			state.lastActivity = state.lastActivity.Add(delta)
+		}
+	}
+	a.mu.RUnlock()
 }
 
 // startCWDUpdater starts a background goroutine that polls each session's current
@@ -406,6 +501,7 @@ func (a *App) updateAllPromptStatuses() {
 	needsInvalidate := false
 	now := time.Now()
 	for _, ref := range sessions {
+		ref.state.drainPendingData()
 		ref.state.screenMu.RLock()
 		screen := ref.state.Screen()
 		newStatus := detectPromptStatus(screen)
@@ -528,24 +624,22 @@ func (a *App) discoverSessions() {
 // Shared between reconnectSession, NewSession, and recreateSession.
 func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 	state.pty.SetOnData(func(data []byte) {
-		state.screenMu.Lock()
-		// Only update lastActivity after startup to avoid tmux screen redraws
-		// on reconnect overwriting the persisted value from config.
-		if a.startupComplete {
-			state.lastActivity = time.Now()
+		// Trace raw PTY data
+		a.traceMu.RLock()
+		if t := a.tracer; t != nil && a.traceSession == name {
+			t.LogPTYData(data)
 		}
-		oldCount := state.scrollback.Count()
-		state.parser.Parse(data)
-		// In scroll mode, compensate scrollOffset so the view stays on the same
-		// historical lines even as new lines push into the scrollback.
-		if state.scrollMode {
-			newCount := state.scrollback.Count()
-			if delta := newCount - oldCount; delta > 0 {
-				state.scrollOffset += delta
-			}
-		}
-		state.ResetScrollOffset() // Snap to bottom on new output (no-op in scroll mode)
-		state.screenMu.Unlock()
+		a.traceMu.RUnlock()
+
+		// Double-buffer: accumulate data instead of parsing immediately.
+		// Parsing happens in drainPendingData() at the start of each Gio frame,
+		// so intermediate screen states (e.g., cleared screen mid-redraw) are
+		// never rendered. The user only sees the final result of each burst.
+		state.pendingMu.Lock()
+		state.pendingData = append(state.pendingData, data...)
+		state.pendingMu.Unlock()
+
+		// Write to PTY log immediately (persistence, not affected by buffering)
 		if state.ptyLog != nil {
 			state.ptyLog.Write(data)
 		}
@@ -630,13 +724,14 @@ func (a *App) reconnectSession(name string) error {
 		}
 	}
 
-	// Restore persisted lastActivity; fall back to now for sessions without one
-	lastActivity := time.Now()
+	// Restore persisted lastActivity from config (adjusted in normalizeActivityTimes)
+	var lastActivity time.Time
 	if sessionInfo.LastActivity > 0 {
 		lastActivity = time.Unix(sessionInfo.LastActivity, 0)
 	}
 
 	state := &SessionState{
+		app:          a,
 		pty:          ptySess,
 		name:         name,
 		sshHost:      sessionInfo.SSHHost,
@@ -717,13 +812,14 @@ func (a *App) recreateSession(name string, info config.SessionInfo) error {
 	// Look up or assign session color
 	sessionColor := a.resolveSessionColor(name)
 
-	// Restore persisted lastActivity; fall back to now for sessions without one
-	lastActivity := time.Now()
+	// Restore persisted lastActivity from config (adjusted in normalizeActivityTimes)
+	var lastActivity time.Time
 	if info.LastActivity > 0 {
 		lastActivity = time.Unix(info.LastActivity, 0)
 	}
 
 	state := &SessionState{
+		app:          a,
 		pty:          ptySess,
 		name:         name,
 		sshHost:      info.SSHHost,
@@ -777,6 +873,121 @@ func (a *App) saveConfig() {
 	}
 }
 
+// StartTrace begins tracing the named session, writing JSONL to ~/.config/prompt-grid/traces/.
+// Returns the trace file path.
+func (a *App) StartTrace(sessionName string) (string, error) {
+	a.mu.RLock()
+	state, ok := a.sessions[sessionName]
+	a.mu.RUnlock()
+	if !ok {
+		return "", ErrSessionNotFound
+	}
+
+	state.screenMu.RLock()
+	screen := state.Screen()
+	cols, rows := screen.Size()
+	scrollbackCount := state.scrollback.Count()
+	screenText := captureScreenText(screen, cols, rows)
+	state.screenMu.RUnlock()
+
+	tracer, path, err := trace.Start(sessionName, cols, rows, scrollbackCount)
+	if err != nil {
+		return "", err
+	}
+
+	// Log initial screen state
+	tracer.Log(trace.Event{
+		Type:   "screen",
+		Text:   screenText,
+		Detail: "initial",
+	})
+
+	a.traceMu.Lock()
+	a.tracer = tracer
+	a.traceSession = sessionName
+	a.traceMu.Unlock()
+
+	return path, nil
+}
+
+// StopTrace stops the active trace and returns the file path.
+func (a *App) StopTrace() string {
+	a.traceMu.Lock()
+	t := a.tracer
+	session := a.traceSession
+	a.tracer = nil
+	a.traceSession = ""
+	a.traceMu.Unlock()
+
+	if t == nil {
+		return ""
+	}
+
+	// Capture final screen
+	a.mu.RLock()
+	state, ok := a.sessions[session]
+	a.mu.RUnlock()
+	if ok {
+		state.screenMu.RLock()
+		screen := state.Screen()
+		cols, rows := screen.Size()
+		screenText := captureScreenText(screen, cols, rows)
+		state.screenMu.RUnlock()
+
+		t.Log(trace.Event{
+			Type:   "screen",
+			Text:   screenText,
+			Detail: "final",
+		})
+	}
+
+	return t.Stop()
+}
+
+// IsTracing returns true if any session is being traced.
+func (a *App) IsTracing() bool {
+	a.traceMu.RLock()
+	defer a.traceMu.RUnlock()
+	return a.tracer != nil
+}
+
+// TracingSession returns the name of the session being traced (empty if not tracing).
+func (a *App) TracingSession() string {
+	a.traceMu.RLock()
+	defer a.traceMu.RUnlock()
+	return a.traceSession
+}
+
+// traceEvent logs an event if the named session is being traced.
+func (a *App) traceEvent(sessionName string, ev trace.Event) {
+	a.traceMu.RLock()
+	t := a.tracer
+	ts := a.traceSession
+	a.traceMu.RUnlock()
+	if t != nil && ts == sessionName {
+		t.Log(ev)
+	}
+}
+
+// captureScreenText returns the current screen content as plain text.
+func captureScreenText(screen *emulator.Screen, cols, rows int) string {
+	var sb strings.Builder
+	for y := 0; y < rows; y++ {
+		for x := 0; x < cols; x++ {
+			cell := screen.Cell(x, y)
+			if cell.Rune == 0 {
+				sb.WriteRune(' ')
+			} else {
+				sb.WriteRune(cell.Rune)
+			}
+		}
+		if y < rows-1 {
+			sb.WriteRune('\n')
+		}
+	}
+	return sb.String()
+}
+
 // Colors returns the current color scheme
 func (a *App) Colors() render.DefaultColors {
 	return a.colors
@@ -827,6 +1038,7 @@ func (a *App) NewSession(name, sshHost, workDir string) (*SessionState, error) {
 	sessionColor := a.resolveSessionColor(name)
 
 	state := &SessionState{
+		app:          a,
 		pty:          ptySess,
 		name:         name,
 		sshHost:      sshHost,
@@ -909,6 +1121,7 @@ func (a *App) newSessionWithCommand(name, workDir, command string) (*SessionStat
 	sessionColor := a.resolveSessionColor(name)
 
 	state := &SessionState{
+		app:          a,
 		pty:          ptySess,
 		name:         name,
 		parser:       parser,
@@ -973,7 +1186,17 @@ func (a *App) ListSessions() []string {
 	return names
 }
 
-// IsSessionActive returns true if a session had PTY output within the given duration.
+// TouchActivity marks a session as recently active (called on user input).
+func (a *App) TouchActivity(name string) {
+	a.mu.RLock()
+	state := a.sessions[name]
+	a.mu.RUnlock()
+	if state != nil {
+		state.lastActivity = time.Now()
+	}
+}
+
+// IsSessionActive returns true if a session had user input within the given duration.
 func (a *App) IsSessionActive(name string, within time.Duration) bool {
 	a.mu.RLock()
 	state := a.sessions[name]
