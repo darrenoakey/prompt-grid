@@ -409,62 +409,70 @@ func (w *TerminalWidget) renderCells(gtx layout.Context) {
 	scrollback := w.state.scrollback
 	scrollOffset := w.state.ScrollOffset()
 	scrollbackCount := scrollback.Count()
+	hasSelection := w.state.hasSelection
 
 	for y := 0; y < rows; y++ {
-		// Calculate which line to display at screen row y
-		// When scrollOffset=0, we show the current screen (scrollbackCount + y maps to screen line y)
-		// When scrollOffset>0, we're viewing history
 		viewLine := scrollbackCount - scrollOffset + y
 
-		for x := 0; x < cols; x++ {
-			var cell emulator.Cell
-			if viewLine < 0 {
-				// Before any content - empty cell
-				cell = emulator.Cell{}
-			} else if viewLine < scrollbackCount {
-				// Line from scrollback
-				line := scrollback.Line(viewLine)
-				if line != nil && x < len(line) {
-					cell = line[x]
-				}
-			} else {
-				// Line from current screen
-				screenY := viewLine - scrollbackCount
-				if screenY < rows {
-					cell = screen.Cell(x, screenY)
+		if viewLine < 0 {
+			continue // Before any content — entire row is empty
+		}
+
+		if viewLine < scrollbackCount {
+			// Scrollback line — fetch once for the whole row
+			line := scrollback.Line(viewLine)
+			if line == nil {
+				continue
+			}
+			for x := 0; x < cols; x++ {
+				if x < len(line) {
+					w.renderCell(gtx, w.theme, x, y, line[x], hasSelection)
 				}
 			}
-			w.renderCell(gtx, w.theme, x, y, cell)
+		} else {
+			// Current screen line
+			screenY := viewLine - scrollbackCount
+			if screenY >= rows {
+				continue
+			}
+			for x := 0; x < cols; x++ {
+				cell := screen.Cell(x, screenY)
+				w.renderCell(gtx, w.theme, x, y, cell, hasSelection)
+			}
 		}
 	}
 }
 
-func (w *TerminalWidget) renderCell(gtx layout.Context, th *material.Theme, x, y int, cell emulator.Cell) {
+func (w *TerminalWidget) renderCell(gtx layout.Context, th *material.Theme, x, y int, cell emulator.Cell, hasSelection bool) {
+	// Fast path: completely empty cell with no selection — skip entirely
+	isEmpty := cell.Rune == 0 || cell.Rune == ' '
+	hasCustomBG := cell.BG.Type != emulator.ColorDefault
+	isReverse := cell.Attrs&emulator.AttrReverse != 0
+	isSelected := hasSelection && w.state.IsSelected(x, y)
+
+	if isEmpty && !hasCustomBG && !isReverse && !isSelected {
+		return // Nothing to draw
+	}
+
 	px := x * w.cellW
 	py := y * w.cellH
 
-	// Check if cell is selected
-	isSelected := w.state.IsSelected(x, y)
-
-	// Get colors - adjust indexed (ANSI) colors for contrast against session background
+	// Get colors
 	fg := cell.FG.ToNRGBA(w.state.colors.Foreground)
 	bg := cell.BG.ToNRGBA(w.state.colors.Background)
 	if cell.FG.Type == emulator.ColorIndexed {
 		fg = render.AdjustForContrast(fg, w.state.colors.Background)
 	}
 
-	// Handle reverse video
-	if cell.Attrs&emulator.AttrReverse != 0 {
+	if isReverse {
 		fg, bg = bg, fg
 	}
-
-	// Invert colors for selection
 	if isSelected {
 		fg, bg = bg, fg
 	}
 
 	// Draw background if needed
-	if cell.BG.Type != emulator.ColorDefault || isSelected || cell.Attrs&emulator.AttrReverse != 0 {
+	if hasCustomBG || isSelected || isReverse {
 		rect := clip.Rect{
 			Min: image.Point{X: px, Y: py},
 			Max: image.Point{X: px + w.cellW, Y: py + w.cellH},
@@ -472,8 +480,7 @@ func (w *TerminalWidget) renderCell(gtx layout.Context, th *material.Theme, x, y
 		paint.FillShape(gtx.Ops, bg, rect)
 	}
 
-	// Skip empty cells (but still draw background for selection)
-	if cell.Rune == 0 || cell.Rune == ' ' {
+	if isEmpty {
 		return
 	}
 

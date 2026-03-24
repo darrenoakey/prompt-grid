@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -209,6 +211,11 @@ func runDaemon() {
 	// Cap Go heap: GC runs aggressively when approaching this limit,
 	// preventing the balloon-to-2GB behaviour seen in Feb 2026 crashes.
 	debug.SetMemoryLimit(600 * 1024 * 1024) // 600 MB
+
+	// pprof HTTP server for profiling (localhost only)
+	go func() {
+		http.ListenAndServe("127.0.0.1:6060", nil)
+	}()
 
 	// Start memory watchdog (monitors heap, crashes at 2GB with dump)
 	memwatch.Start(func() map[string]int {

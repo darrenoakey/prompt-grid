@@ -90,9 +90,10 @@ type SessionState struct {
 	lastAutoMenuTime time.Time // Last time auto-menu sent "1" to this session
 
 	// Double-buffer: PTY data is buffered and parsed in drainPendingData().
-	pendingMu       sync.Mutex
-	pendingData     []byte
-	pendingLastRecv time.Time // Timestamp of most recent PTY data arrival
+	pendingMu          sync.Mutex
+	pendingData        []byte
+	pendingLastRecv    time.Time // Timestamp of most recent PTY data arrival
+	pendingLastInvalid time.Time // Last time invalidateSession was called (rate limit)
 
 	// Selection state
 	selStart     SelectionPoint
@@ -500,6 +501,14 @@ func (a *App) updateAllPromptStatuses() {
 	needsInvalidate := false
 	now := time.Now()
 	for _, ref := range sessions {
+		// Skip sessions with no new data since last check (nothing changed)
+		ref.state.pendingMu.Lock()
+		hasPending := len(ref.state.pendingData) > 0
+		ref.state.pendingMu.Unlock()
+		if !hasPending {
+			continue
+		}
+
 		ref.state.drainPendingData()
 		ref.state.screenMu.RLock()
 		screen := ref.state.Screen()
@@ -634,14 +643,23 @@ func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 		// Parsing happens in drainPendingData() before each render.
 		state.pendingMu.Lock()
 		state.pendingData = append(state.pendingData, data...)
-		state.pendingLastRecv = time.Now()
+		now := time.Now()
+		state.pendingLastRecv = now
+		// Rate-limit invalidation: at most once per 8ms to avoid waking the
+		// Gio frame loop on every PTY read during bursts.
+		shouldInvalidate := now.Sub(state.pendingLastInvalid) >= 8*time.Millisecond
+		if shouldInvalidate {
+			state.pendingLastInvalid = now
+		}
 		state.pendingMu.Unlock()
 
 		// Write to PTY log immediately (persistence, not affected by buffering)
 		if state.ptyLog != nil {
 			state.ptyLog.Write(data)
 		}
-		a.invalidateSession(name)
+		if shouldInvalidate {
+			a.invalidateSession(name)
+		}
 	})
 
 	state.pty.SetOnExit(func(err error) {
