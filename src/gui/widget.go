@@ -64,23 +64,27 @@ func (w *TerminalWidget) Layout(gtx layout.Context) layout.Dimensions {
 	// Padding around content
 	padding := 8
 
-	// Drain all buffered PTY data in one batch before rendering.
-	// This is the double-buffer mechanism: intermediate screen states
-	// (e.g., screen cleared mid-redraw) are never visible to the user.
-	w.state.drainPendingData()
-
-	// Coalesce: if PTY data arrived very recently (<5ms), the app is likely
-	// mid-redraw. Skip this frame and request another — by then, more data
-	// will have accumulated for a more complete render.
+	// Double-buffer with burst coalescing: if PTY data is actively flowing
+	// (arrived within last 8ms), DON'T drain — keep showing the old screen.
+	// This prevents mid-redraw states from ever being visible. When the burst
+	// ends (>8ms since last data), drain everything and render the final result.
+	// Input is always processed regardless (typing stays responsive).
 	w.state.pendingMu.Lock()
 	sinceLastRecv := time.Since(w.state.pendingLastRecv)
+	hasPending := len(w.state.pendingData) > 0
 	w.state.pendingMu.Unlock()
-	if sinceLastRecv < 5*time.Millisecond && sinceLastRecv > 0 {
+
+	burstActive := hasPending && sinceLastRecv < 8*time.Millisecond && sinceLastRecv > 0
+	if !burstActive {
+		// Burst over (or no data): drain all accumulated data and render
+		w.state.drainPendingData()
+	} else {
+		// Mid-burst: skip drain, keep old screen, request another frame
 		gtx.Execute(op.InvalidateCmd{})
 	}
 
 	// Handle input first (may modify scrollOffset via AdjustScrollOffset).
-	// This runs on the Gio main thread before we take the read lock.
+	// Always runs even during bursts so typing stays responsive.
 	w.handleInput(gtx)
 
 	// Hold the read lock for the entire render phase so the PTY callback
