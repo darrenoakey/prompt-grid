@@ -29,6 +29,8 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
+	"github.com/darrenoakey/daz-golang-gio/persist"
+
 	"prompt-grid/src/pty"
 	"prompt-grid/src/render"
 	"prompt-grid/src/tmux"
@@ -43,37 +45,37 @@ var logoBytes []byte
 
 // ControlWindow is the control center showing all sessions
 type ControlWindow struct {
-	app            *App
-	window         *app.Window
-	shaper         *text.Shaper
-	theme          *material.Theme            // Persistent theme (avoids per-frame allocation)
-	ops            op.Ops
-	selected       string
-	tabStates      map[string]*tabState       // Persistent tab states keyed by name
-	termWidgets    map[string]*TerminalWidget // Persistent terminal widgets keyed by session name
-	contextMenu      *contextMenuState          // Right-click context menu
-	menuOverlay      *menuOverlay               // Fullscreen overlay to catch clicks outside menu
-	tabPanelBg       *tabPanelBackground        // For right-click on empty tab area
-	renameState      *renameState               // For renaming sessions
-	newSessionState  *newSessionState           // For creating new sessions with inline name input
-	focusTerminal    bool                       // One-shot: request focus for terminal widget next frame
-	lastTermSize     image.Point               // Last terminal area size (pixels) for resize detection
-	lastSelected     string                    // Last selected session name for resize-on-switch
-	lastWindowSize   image.Point               // Last window size for tracking changes
-	logoImage        image.Image               // Embedded logo
-	searchEditor     widget.Editor             // Search input
-	searchQuery      string                    // Current search query
-	newSessionBtn    *sessionButton            // "NEW SESSION" button target
-	settingsMenu       *settingsMenuState        // Settings gear dropdown
-	settingsBtn        *settingsButton           // Persistent target for gear icon
-	traceBtn           *traceButton              // Persistent target for trace button
-	tabScrollOffset    int                       // Pixel offset for session list scrolling
-	tabListHeight      int                       // Total height of all session tabs (for clamping)
-	searchFocused      bool                      // True when search editor has keyboard focus
-	revealedSessions   map[string]bool           // Sessions revealed via search while collapse mode is on
-	hiddenCount        int                       // Number of sessions hidden by collapse mode (for display)
-	hiddenSessionsBtn  *hiddenSessionsButton     // Persistent target for "+N inactive" click area
-	sessionsHeader     *sessionsHeaderBtn        // Persistent target for SESSIONS header click (toggle collapse)
+	app               *App
+	window            *persist.Window
+	shaper            *text.Shaper
+	theme             *material.Theme // Persistent theme (avoids per-frame allocation)
+	ops               op.Ops
+	selected          string
+	tabStates         map[string]*tabState       // Persistent tab states keyed by name
+	termWidgets       map[string]*TerminalWidget // Persistent terminal widgets keyed by session name
+	contextMenu       *contextMenuState          // Right-click context menu
+	menuOverlay       *menuOverlay               // Fullscreen overlay to catch clicks outside menu
+	tabPanelBg        *tabPanelBackground        // For right-click on empty tab area
+	renameState       *renameState               // For renaming sessions
+	newSessionState   *newSessionState           // For creating new sessions with inline name input
+	focusTerminal     bool                       // One-shot: request focus for terminal widget next frame
+	lastTermSize      image.Point                // Last terminal area size (pixels) for resize detection
+	lastSelected      string                     // Last selected session name for resize-on-switch
+	lastWindowSize    image.Point                // Last window size for tracking changes
+	logoImage         image.Image                // Embedded logo
+	searchEditor      widget.Editor              // Search input
+	searchQuery       string                     // Current search query
+	newSessionBtn     *sessionButton             // "NEW SESSION" button target
+	settingsMenu      *settingsMenuState         // Settings gear dropdown
+	settingsBtn       *settingsButton            // Persistent target for gear icon
+	traceBtn          *traceButton               // Persistent target for trace button
+	tabScrollOffset   int                        // Pixel offset for session list scrolling
+	tabListHeight     int                        // Total height of all session tabs (for clamping)
+	searchFocused     bool                       // True when search editor has keyboard focus
+	revealedSessions  map[string]bool            // Sessions revealed via search while collapse mode is on
+	hiddenCount       int                        // Number of sessions hidden by collapse mode (for display)
+	hiddenSessionsBtn *hiddenSessionsButton      // Persistent target for "+N inactive" click area
+	sessionsHeader    *sessionsHeaderBtn         // Persistent target for SESSIONS header click (toggle collapse)
 }
 
 // traceButton is a persistent target for the Trace button
@@ -81,7 +83,6 @@ type traceButton struct{}
 
 // settingsButton is a persistent target for the settings gear icon
 type settingsButton struct{}
-
 
 // settingsMenuState tracks the settings dropdown
 type settingsMenuState struct {
@@ -126,10 +127,10 @@ type tabState struct {
 }
 
 type contextMenuState struct {
-	visible         bool
-	sessionName     string
-	position        image.Point
-	items           []*menuItem
+	visible          bool
+	sessionName      string
+	position         image.Point
+	items            []*menuItem
 	activeSubmenuIdx int // Index of parent item whose submenu is open (-1 = none)
 }
 
@@ -142,20 +143,28 @@ type menuItem struct {
 
 // NewControlWindow creates the control center window
 func NewControlWindow(application *App) *ControlWindow {
+	// Restore window size from config, or use default
+	width, height := 1000, 600
+	if application.config != nil {
+		if w, h, ok := application.config.GetControlCenterSize(); ok {
+			width, height = w, h
+		}
+	}
+
 	win := &ControlWindow{
-		app:             application,
-		window:          new(app.Window),
-		tabStates:       make(map[string]*tabState),
-		termWidgets:     make(map[string]*TerminalWidget),
-		contextMenu:     &contextMenuState{},
-		menuOverlay:     &menuOverlay{},
-		tabPanelBg:      &tabPanelBackground{},
-		renameState:     &renameState{},
-		newSessionState: &newSessionState{},
+		app:               application,
+		window:            persist.NewWindow("prompt-grid", app.Title("prompt-grid"), app.Size(unit.Dp(width), unit.Dp(height))),
+		tabStates:         make(map[string]*tabState),
+		termWidgets:       make(map[string]*TerminalWidget),
+		contextMenu:       &contextMenuState{},
+		menuOverlay:       &menuOverlay{},
+		tabPanelBg:        &tabPanelBackground{},
+		renameState:       &renameState{},
+		newSessionState:   &newSessionState{},
 		newSessionBtn:     &sessionButton{},
-		settingsMenu:     &settingsMenuState{},
-		settingsBtn:      &settingsButton{},
-		traceBtn:         &traceButton{},
+		settingsMenu:      &settingsMenuState{},
+		settingsBtn:       &settingsButton{},
+		traceBtn:          &traceButton{},
 		revealedSessions:  make(map[string]bool),
 		hiddenSessionsBtn: &hiddenSessionsButton{},
 		sessionsHeader:    &sessionsHeaderBtn{},
@@ -167,19 +176,6 @@ func NewControlWindow(application *App) *ControlWindow {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load logo: %v\n", err)
 	}
-
-	// Restore window size from config, or use default
-	width, height := 1000, 600
-	if application.config != nil {
-		if w, h, ok := application.config.GetControlCenterSize(); ok {
-			width, height = w, h
-		}
-	}
-
-	win.window.Option(
-		app.Title("prompt-grid"),
-		app.Size(unit.Dp(width), unit.Dp(height)),
-	)
 
 	win.shaper = text.NewShaper(text.WithCollection(render.CreateFontCollection()))
 	win.theme = material.NewTheme()
@@ -245,6 +241,7 @@ func (w *ControlWindow) Run() error {
 	for {
 		switch e := w.window.Event().(type) {
 		case app.DestroyEvent:
+			w.window.Close()
 			return e.Err
 		case app.FrameEvent:
 			frameCount++
@@ -1256,9 +1253,9 @@ func (w *ControlWindow) layoutRenameInputInline(gtx layout.Context, height int) 
 	// Draw input border (cyan accent)
 	borderColor := color.NRGBA{R: 0, G: 255, B: 200, A: 255}
 	for _, edge := range []clip.Rect{
-		{Min: image.Point{X: 8, Y: 4}, Max: image.Point{X: sidebarWidth - 8, Y: 5}},                 // top
-		{Min: image.Point{X: 8, Y: height - 5}, Max: image.Point{X: sidebarWidth - 8, Y: height - 4}}, // bottom
-		{Min: image.Point{X: 8, Y: 4}, Max: image.Point{X: 9, Y: height - 4}},                        // left
+		{Min: image.Point{X: 8, Y: 4}, Max: image.Point{X: sidebarWidth - 8, Y: 5}},                         // top
+		{Min: image.Point{X: 8, Y: height - 5}, Max: image.Point{X: sidebarWidth - 8, Y: height - 4}},       // bottom
+		{Min: image.Point{X: 8, Y: 4}, Max: image.Point{X: 9, Y: height - 4}},                               // left
 		{Min: image.Point{X: sidebarWidth - 9, Y: 4}, Max: image.Point{X: sidebarWidth - 8, Y: height - 4}}, // right
 	} {
 		paint.FillShape(gtx.Ops, borderColor, edge.Op())
@@ -1385,8 +1382,6 @@ func (w *ControlWindow) layoutStatusBar(gtx layout.Context) layout.Dimensions {
 
 	return layout.Dimensions{Size: image.Point{X: gtx.Constraints.Max.X, Y: statusBarHeight}}
 }
-
-
 
 func shiftChar(ch byte) byte {
 	if ch >= 'A' && ch <= 'Z' {

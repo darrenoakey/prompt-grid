@@ -227,6 +227,18 @@ Rename sessions:
 - tmux sends `?1049h` immediately on `attach-session`. Do NOT suppress scrollback pushes based on `altScreen` — that breaks all scrollback for every tmux session.
 - **Always use `state.Screen()` method** (not `state.screen` field directly) to get the correct current screen through the parser delegation chain.
 
+### Scroll Regions (DECSTBM) and TUI Rendering
+- `\x1b[top;bottom r` (DECSTBM) sets scroll region; tmux uses this to render pane content independently of status bars
+- **Scrollback push rule**: only push to scrollback when `scrollTop == 0 && scrollBot == rows-1` (full screen). Sub-region scrolls discard scrolled-off lines — they're internal to a pane, not leaving the screen.
+- **LF outside region**: if cursor is below scrollBot, LF moves cursor down (clamp at screen bottom) — does NOT trigger region scroll
+- **CUU/CUD clamping**: CUU clamps at scrollTop when cursor is inside region (row 0 when outside); CUD clamps at scrollBot when inside (rows-1 when outside)
+- **RI (Reverse Index)**: only triggers scroll-down when cursor is exactly at scrollTop (not `<=`)
+- **Write() auto-wrap**: only triggers region scroll when wrapping from inside the region
+- **ED (Erase Display)**: does NOT respect scroll regions — always operates on full screen
+- **IL/DL**: only operate within scroll region; no-op if cursor is outside
+- **DECSC/DECRC** (`ESC 7`/`ESC 8`): save/restore cursor position and attributes. tmux uses these when switching between rendering different screen areas. Parser stores `savedCursor`, `savedAttrs`, `hasSaved`.
+- **Coalesce rendering**: widget requests another frame if PTY data arrived <5ms ago, letting TUI redraw bursts complete before rendering
+
 ### Scrollback Viewing & Scroll Mode
 - Mouse wheel scrolls through terminal history
 - `scrollOffset` in SessionState tracks view position (0 = live view)
