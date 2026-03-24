@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"gioui.org/app"
@@ -91,13 +90,9 @@ type SessionState struct {
 	lastAutoMenuTime time.Time // Last time auto-menu sent "1" to this session
 
 	// Double-buffer: PTY data is buffered and parsed in drainPendingData().
-	// Invalidation is coalesced: 8ms trailing-edge timer after last data
-	// (lets short bursts like screen redraws complete in one shot), with
-	// forced render every 100ms during long operations so user sees progress.
-	pendingMu        sync.Mutex
-	pendingData      []byte
-	pendingFirstRecv time.Time    // Start of current burst (reset on render)
-	pendingHasTimer  atomic.Bool  // True while coalesce timer is pending
+	pendingMu       sync.Mutex
+	pendingData     []byte
+	pendingLastRecv time.Time // Timestamp of most recent PTY data arrival
 
 	// Selection state
 	selStart     SelectionPoint
@@ -636,41 +631,17 @@ func (a *App) setupSessionCallbacks(state *SessionState, name string) {
 		a.traceMu.RUnlock()
 
 		// Double-buffer: accumulate data instead of parsing immediately.
-		// Parsing happens in drainPendingData() at the start of each Gio frame.
+		// Parsing happens in drainPendingData() before each render.
 		state.pendingMu.Lock()
 		state.pendingData = append(state.pendingData, data...)
-		now := time.Now()
-		if state.pendingFirstRecv.IsZero() {
-			state.pendingFirstRecv = now
-		}
-		// Force render every 100ms during long operations so user sees progress
-		forceRender := now.Sub(state.pendingFirstRecv) >= 100*time.Millisecond
-		if forceRender {
-			state.pendingFirstRecv = now // Reset epoch for next interval
-		}
+		state.pendingLastRecv = time.Now()
 		state.pendingMu.Unlock()
 
 		// Write to PTY log immediately (persistence, not affected by buffering)
 		if state.ptyLog != nil {
 			state.ptyLog.Write(data)
 		}
-
-		if forceRender {
-			// Long burst: force render so user sees streaming output
-			state.pendingHasTimer.Store(false)
-			a.invalidateSession(name)
-		} else if state.pendingHasTimer.CompareAndSwap(false, true) {
-			// Start coalesce timer: render 8ms after last data in burst.
-			// This lets short bursts (screen redraws) complete before rendering.
-			go func() {
-				time.Sleep(8 * time.Millisecond)
-				state.pendingHasTimer.Store(false)
-				state.pendingMu.Lock()
-				state.pendingFirstRecv = time.Time{}
-				state.pendingMu.Unlock()
-				a.invalidateSession(name)
-			}()
-		}
+		a.invalidateSession(name)
 	})
 
 	state.pty.SetOnExit(func(err error) {

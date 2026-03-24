@@ -41,6 +41,11 @@ type Parser struct {
 	utf8Buf      [4]byte // Buffer for UTF-8 multi-byte sequences
 	utf8Len      int     // Current bytes in utf8Buf
 	utf8Need     int     // Total bytes needed for current sequence
+
+	// DECSC/DECRC saved cursor state
+	savedCursor Cursor
+	savedAttrs  Cell
+	hasSaved    bool
 }
 
 // NewParser creates a new parser connected to a screen and scrollback
@@ -174,11 +179,16 @@ func (p *Parser) parseGroundByte(b byte) {
 }
 
 func (p *Parser) lineFeed() {
-	_, scrollBot := p.screen.ScrollRegion()
+	scrollTop, scrollBot := p.screen.ScrollRegion()
+	_, rows := p.screen.Size()
 	if p.screen.cursor.Y >= scrollBot {
 		scrolled := p.screen.ScrollUp(1)
-		for _, line := range scrolled {
-			p.scrollback.Push(line)
+		// Only push to scrollback when the scroll region is the full screen.
+		// Sub-region scrolls (e.g., tmux pane) discard the scrolled-off lines.
+		if scrollTop == 0 && scrollBot == rows-1 {
+			for _, line := range scrolled {
+				p.scrollback.Push(line)
+			}
 		}
 	} else {
 		p.screen.cursor.Y++
@@ -211,17 +221,22 @@ func (p *Parser) parseEscape(b byte) {
 		p.state = StateGround
 	case b == 'M': // RI - Reverse Index
 		scrollTop, _ := p.screen.ScrollRegion()
-		if p.screen.cursor.Y <= scrollTop {
+		if p.screen.cursor.Y == scrollTop {
 			p.screen.ScrollDown(1)
-		} else {
+		} else if p.screen.cursor.Y > 0 {
 			p.screen.cursor.Y--
 		}
 		p.state = StateGround
-	case b == '7': // DECSC - Save cursor
-		// TODO: implement cursor save
+	case b == '7': // DECSC - Save cursor position and attributes
+		p.savedCursor = p.screen.cursor
+		p.savedAttrs = p.screen.attrs
+		p.hasSaved = true
 		p.state = StateGround
-	case b == '8': // DECRC - Restore cursor
-		// TODO: implement cursor restore
+	case b == '8': // DECRC - Restore cursor position and attributes
+		if p.hasSaved {
+			p.screen.cursor = p.savedCursor
+			p.screen.attrs = p.savedAttrs
+		}
 		p.state = StateGround
 	case b == '=': // DECKPAM
 		p.state = StateGround
@@ -368,11 +383,21 @@ func (p *Parser) executeCSI(final byte) {
 	switch final {
 	case 'A': // CUU - Cursor Up
 		n := param(0, 1)
-		p.screen.cursor.Y = max(0, p.screen.cursor.Y-n)
+		scrollTop, _ := p.screen.ScrollRegion()
+		minY := 0
+		if p.screen.cursor.Y >= scrollTop {
+			minY = scrollTop // Clamp at scroll region top when inside
+		}
+		p.screen.cursor.Y = max(minY, p.screen.cursor.Y-n)
 
 	case 'B': // CUD - Cursor Down
 		n := param(0, 1)
-		p.screen.cursor.Y = min(rows-1, p.screen.cursor.Y+n)
+		_, scrollBot := p.screen.ScrollRegion()
+		maxY := rows - 1
+		if p.screen.cursor.Y <= scrollBot {
+			maxY = scrollBot // Clamp at scroll region bottom when inside
+		}
+		p.screen.cursor.Y = min(maxY, p.screen.cursor.Y+n)
 
 	case 'C': // CUF - Cursor Forward
 		n := param(0, 1)

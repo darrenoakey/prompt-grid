@@ -103,9 +103,12 @@ func (s *Screen) Write(r rune) {
 	if s.cursor.X >= s.cols {
 		s.cursor.X = 0
 		s.cursor.Y++
-		if s.cursor.Y > s.scrollBot {
+		if s.cursor.Y > s.scrollBot && s.cursor.Y-1 <= s.scrollBot {
+			// Wrapped past bottom of scroll region from inside → scroll
 			s.ScrollUp(1)
 			s.cursor.Y = s.scrollBot
+		} else if s.cursor.Y >= s.rows {
+			s.cursor.Y = s.rows - 1
 		}
 	}
 

@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"os/exec"
 	"strings"
+	"time"
 
 	"gioui.org/font"
 	"gioui.org/io/event"
@@ -67,6 +68,16 @@ func (w *TerminalWidget) Layout(gtx layout.Context) layout.Dimensions {
 	// This is the double-buffer mechanism: intermediate screen states
 	// (e.g., screen cleared mid-redraw) are never visible to the user.
 	w.state.drainPendingData()
+
+	// Coalesce: if PTY data arrived very recently (<5ms), the app is likely
+	// mid-redraw. Skip this frame and request another — by then, more data
+	// will have accumulated for a more complete render.
+	w.state.pendingMu.Lock()
+	sinceLastRecv := time.Since(w.state.pendingLastRecv)
+	w.state.pendingMu.Unlock()
+	if sinceLastRecv < 5*time.Millisecond && sinceLastRecv > 0 {
+		gtx.Execute(op.InvalidateCmd{})
+	}
 
 	// Handle input first (may modify scrollOffset via AdjustScrollOffset).
 	// This runs on the Gio main thread before we take the read lock.
