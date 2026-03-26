@@ -65,21 +65,20 @@ func (w *TerminalWidget) Layout(gtx layout.Context) layout.Dimensions {
 	padding := 8
 
 	// Double-buffer with burst coalescing: if PTY data is actively flowing
-	// (arrived within last 8ms), DON'T drain — keep showing the old screen.
-	// This prevents mid-redraw states from ever being visible. When the burst
-	// ends (>8ms since last data), drain everything and render the final result.
-	// Input is always processed regardless (typing stays responsive).
+	// (>4KB arrived recently), the app is likely mid-redraw. Don't drain —
+	// keep the old screen visible until the burst settles. This prevents
+	// seeing partial screen redraws during TUI updates.
 	w.state.pendingMu.Lock()
 	sinceLastRecv := time.Since(w.state.pendingLastRecv)
-	hasPending := len(w.state.pendingData) > 0
+	pendingSize := len(w.state.pendingData)
 	w.state.pendingMu.Unlock()
 
-	burstActive := hasPending && sinceLastRecv < 8*time.Millisecond && sinceLastRecv > 0
+	// Burst = significant data volume + arrived recently. The 16ms window
+	// (one frame at 60fps) catches bursts that span multiple PTY reads.
+	burstActive := pendingSize > 4096 && sinceLastRecv < 16*time.Millisecond && sinceLastRecv > 0
 	if !burstActive {
-		// Burst over (or no data): drain all accumulated data and render
 		w.state.drainPendingData()
 	} else {
-		// Mid-burst: skip drain, keep old screen, request another frame
 		gtx.Execute(op.InvalidateCmd{})
 	}
 

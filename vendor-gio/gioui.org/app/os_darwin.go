@@ -139,8 +139,10 @@ func newDisplayLink(callback func()) (*displayLink, error) {
 	return d, nil
 }
 
-// runFallback drives animation at ~60fps using a time.Ticker when CVDisplayLink
-// is unavailable. It mirrors the state-machine of run() but without the C layer.
+// runFallback drives animation at ~30fps using a time.Ticker when CVDisplayLink
+// is unavailable. 30fps balances CPU savings (2x less than 60fps) with typing
+// responsiveness (33ms max latency). It mirrors the state-machine of run() but
+// without the C layer.
 func (d *displayLink) runFallback() {
 	var ticker *time.Ticker
 	var tchan <-chan time.Time
@@ -154,7 +156,7 @@ func (d *displayLink) runFallback() {
 		case start := <-d.states:
 			if start && !started {
 				started = true
-				ticker = time.NewTicker(time.Second / 60)
+				ticker = time.NewTicker(time.Second / 30)
 				tchan = ticker.C
 				atomic.StoreUint32(&d.running, 1)
 			} else if !start && started {
