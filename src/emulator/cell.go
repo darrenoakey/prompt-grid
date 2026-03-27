@@ -27,8 +27,8 @@ const (
 
 // Color represents a terminal color
 type Color struct {
-	Type  ColorType
-	Index uint8 // For indexed colors (0-255)
+	Type    ColorType
+	Index   uint8 // For indexed colors (0-255)
 	R, G, B uint8 // For RGB colors
 }
 

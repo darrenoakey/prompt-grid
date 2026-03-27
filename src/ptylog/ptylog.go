@@ -11,10 +11,10 @@ import (
 
 const (
 	flushInterval = 200 * time.Millisecond // Reduced from 2s to 200ms for better persistence
-	flushSize     = 64 * 1024       // 64KB
-	maxLogSize    = 10 * 1024 * 1024 // 10MB
-	truncTarget   = 5 * 1024 * 1024  // 5MB — keep last 5MB after truncation
-	replayChunk   = 32 * 1024       // 32KB chunks for replay
+	flushSize     = 64 * 1024              // 64KB
+	maxLogSize    = 10 * 1024 * 1024       // 10MB
+	truncTarget   = 5 * 1024 * 1024        // 5MB — keep last 5MB after truncation
+	replayChunk   = 32 * 1024              // 32KB chunks for replay
 )
 
 // Parser is the interface ptylog needs for replay (avoids circular import)
@@ -41,13 +41,13 @@ func sanitize(name string) string {
 
 // Writer buffers and writes PTY output to a log file
 type Writer struct {
-	mu      sync.Mutex
-	file    *os.File
-	buf     []byte
-	size    int64 // Current file size (approximate)
-	timer   *time.Timer
-	closed  bool
-	name    string
+	mu     sync.Mutex
+	file   *os.File
+	buf    []byte
+	size   int64 // Current file size (approximate)
+	timer  *time.Timer
+	closed bool
+	name   string
 }
 
 // NewWriter creates a new PTY log writer for the given session name.

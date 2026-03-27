@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	maxIntermediateLen = 64      // Cap intermediate string at 64 bytes
+	maxIntermediateLen = 64        // Cap intermediate string at 64 bytes
 	maxOSCStringLen    = 64 * 1024 // Cap OSC string at 64KB
 )
 
@@ -32,7 +32,7 @@ type Parser struct {
 	state        ParserState
 	screen       *Screen
 	scrollback   *Scrollback
-	altScreen    bool    // true when on alternate screen buffer
+	altScreen    bool // true when on alternate screen buffer
 	params       []int
 	intermediate string
 	oscString    strings.Builder

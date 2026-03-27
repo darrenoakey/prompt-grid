@@ -8,7 +8,7 @@ require (
 	gioui.org v0.9.0
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/creack/pty v1.1.23
-	github.com/darrenoakey/daz-golang-gio v0.0.2
+	github.com/darrenoakey/daz-golang-gio v0.0.5
 	github.com/zalando/go-keyring v0.2.6
 	golang.org/x/image v0.26.0
 )

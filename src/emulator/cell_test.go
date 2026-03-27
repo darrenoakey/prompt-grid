@@ -79,7 +79,7 @@ func TestColorToNRGBA(t *testing.T) {
 func TestPalette256(t *testing.T) {
 	// Test some known values
 	tests := []struct {
-		index uint8
+		index   uint8
 		r, g, b uint8
 	}{
 		{0, 0, 0, 0},         // Black

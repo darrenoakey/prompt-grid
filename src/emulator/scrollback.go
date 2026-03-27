@@ -13,10 +13,10 @@ import (
 )
 
 const (
-	ringSize     = 100              // Lines kept in memory ring buffer
+	ringSize     = 100             // Lines kept in memory ring buffer
 	diskMaxBytes = 5 * 1024 * 1024 // 5MB max disk file size
 	diskTrimTo   = 2 * 1024 * 1024 // Trim to ~2MB when over limit
-	cacheWindow  = 1_000            // Lines loaded from disk per cache fill
+	cacheWindow  = 1_000           // Lines loaded from disk per cache fill
 )
 
 // ScrollbackPath returns the JSONL scrollback file path for a session name.
@@ -52,9 +52,9 @@ type Scrollback struct {
 	total    int // Total accessible lines (= disk file line count)
 
 	// Disk storage
-	path  string
-	file  *os.File
-	wbuf  *bufio.Writer
+	path   string
+	file   *os.File
+	wbuf   *bufio.Writer
 	fbytes int64 // Approximate bytes written (for trim check)
 
 	// replay=true suppresses disk writes during ptylog replay

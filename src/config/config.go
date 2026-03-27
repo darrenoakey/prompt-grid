@@ -8,7 +8,7 @@ import (
 
 // SessionInfo describes a session for persistence across restarts
 type SessionInfo struct {
-	Type         string `json:"type"`                    // "shell", "ssh", "claude"
+	Type         string `json:"type"` // "shell", "ssh", "claude"
 	WorkDir      string `json:"work_dir,omitempty"`
 	SSHHost      string `json:"ssh_host,omitempty"`
 	LastActivity int64  `json:"last_activity,omitempty"` // Unix timestamp of last PTY output
@@ -26,15 +26,15 @@ type UISettings struct {
 
 // Config holds application configuration
 type Config struct {
-	Discord             DiscordConfig          `json:"discord"`
-	Claude              ClaudeSettings         `json:"claude,omitempty"`
-	UI                  UISettings             `json:"ui,omitempty"`
-	SessionColors       map[string]int         `json:"session_colors,omitempty"`
-	WindowSizes         map[string][2]int      `json:"window_sizes,omitempty"`
-	Sessions            map[string]SessionInfo `json:"sessions,omitempty"`
-	LastSelected        string                 `json:"last_selected,omitempty"`
-	ControlCenterSize   [2]int                 `json:"control_center_size,omitempty"`     // [width, height]
-	ControlCenterPos    [2]int                 `json:"control_center_position,omitempty"` // [x, y]
+	Discord           DiscordConfig          `json:"discord"`
+	Claude            ClaudeSettings         `json:"claude,omitempty"`
+	UI                UISettings             `json:"ui,omitempty"`
+	SessionColors     map[string]int         `json:"session_colors,omitempty"`
+	WindowSizes       map[string][2]int      `json:"window_sizes,omitempty"`
+	Sessions          map[string]SessionInfo `json:"sessions,omitempty"`
+	LastSelected      string                 `json:"last_selected,omitempty"`
+	ControlCenterSize [2]int                 `json:"control_center_size,omitempty"`     // [width, height]
+	ControlCenterPos  [2]int                 `json:"control_center_position,omitempty"` // [x, y]
 }
 
 // DiscordConfig holds Discord-specific configuration

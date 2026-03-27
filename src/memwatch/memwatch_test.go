@@ -25,7 +25,7 @@ func TestWriteDump(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	w := &Watchdog{
-		threshold:  1024,
+		threshold: 1024,
 		introspect: func() map[string]int {
 			return map[string]int{"TestSession": 42}
 		},

@@ -65,15 +65,15 @@ type SelectionPoint struct {
 
 // SessionState holds state for a single session
 type SessionState struct {
-	app        *App // Back-reference for tracing
-	pty        *pty.Session
-	name       string
-	sshHost    string
-	parser     *emulator.Parser
-	screen     *emulator.Screen
-	scrollback *emulator.Scrollback
-	window     *TerminalWindow
-	colors     render.SessionColor // Unique color for this session
+	app          *App // Back-reference for tracing
+	pty          *pty.Session
+	name         string
+	sshHost      string
+	parser       *emulator.Parser
+	screen       *emulator.Screen
+	scrollback   *emulator.Scrollback
+	window       *TerminalWindow
+	colors       render.SessionColor // Unique color for this session
 	ptyLog       *ptylog.Writer      // PTY output logger for persistence
 	promptStatus PromptStatusValue   // Current prompt detection status (atomic)
 

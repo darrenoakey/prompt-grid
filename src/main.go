@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"gioui.org/app"
+	"github.com/darrenoakey/daz-golang-gio/macos"
 
 	"prompt-grid/src/config"
 	"prompt-grid/src/discord"
@@ -22,6 +24,9 @@ import (
 	"prompt-grid/src/memwatch"
 	"prompt-grid/src/tmux"
 )
+
+//go:embed gui/icon.png
+var dockIconBytes []byte
 
 const daemonEnvVar = "CLAUDE_TERM_DAEMON"
 
@@ -150,7 +155,7 @@ func runDaemon() {
 	// Keep lockFile open for process lifetime (lock released on exit)
 
 	// Set macOS dock icon
-	setDockIcon()
+	macos.SetDockIcon(dockIconBytes)
 
 	// Ensure tmux is available
 	if err := tmux.EnsureInstalled(); err != nil {

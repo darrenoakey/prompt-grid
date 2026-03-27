@@ -13,17 +13,17 @@ import (
 // Event is a single trace event written as JSONL.
 type Event struct {
 	Time    string `json:"time"`
-	Type    string `json:"type"`              // start, stop, pty_data, key_press, key_edit, scroll, paste, screen
+	Type    string `json:"type"` // start, stop, pty_data, key_press, key_edit, scroll, paste, screen
 	Session string `json:"session,omitempty"`
-	Data    string `json:"data,omitempty"`     // base64 for raw PTY data
-	Key     string `json:"key,omitempty"`      // key name for key_press
-	Mods    string `json:"mods,omitempty"`     // modifier keys
-	Text    string `json:"text,omitempty"`     // text content (edit, paste, screen)
-	Delta   int    `json:"delta,omitempty"`    // scroll delta
-	Cols    int    `json:"cols,omitempty"`     // terminal columns
-	Rows    int    `json:"rows,omitempty"`     // terminal rows
-	Lines   int    `json:"lines,omitempty"`    // scrollback line count
-	Detail  string `json:"detail,omitempty"`   // extra context
+	Data    string `json:"data,omitempty"`   // base64 for raw PTY data
+	Key     string `json:"key,omitempty"`    // key name for key_press
+	Mods    string `json:"mods,omitempty"`   // modifier keys
+	Text    string `json:"text,omitempty"`   // text content (edit, paste, screen)
+	Delta   int    `json:"delta,omitempty"`  // scroll delta
+	Cols    int    `json:"cols,omitempty"`   // terminal columns
+	Rows    int    `json:"rows,omitempty"`   // terminal rows
+	Lines   int    `json:"lines,omitempty"`  // scrollback line count
+	Detail  string `json:"detail,omitempty"` // extra context
 }
 
 // Tracer writes trace events to a JSONL file.

@@ -22,17 +22,17 @@ var DefaultSize = Size{Cols: 120, Rows: 24}
 
 // Session manages a single PTY process
 type Session struct {
-	name         string
-	pty          *os.File
-	cmd          *exec.Cmd
-	size         Size
-	onData       func([]byte)
-	onExit       func(error)
-	done         chan struct{}
-	mu           sync.RWMutex
-	closed       bool
-	sshCmd       string // If non-empty, this is an SSH session
-	sshHost      string
+	name          string
+	pty           *os.File
+	cmd           *exec.Cmd
+	size          Size
+	onData        func([]byte)
+	onExit        func(error)
+	done          chan struct{}
+	mu            sync.RWMutex
+	closed        bool
+	sshCmd        string // If non-empty, this is an SSH session
+	sshHost       string
 	autoReconnect bool
 }
 

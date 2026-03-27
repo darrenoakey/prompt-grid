@@ -67,7 +67,7 @@ func TryConnect(req Request) (bool, error) {
 
 // Server listens for incoming session requests
 type Server struct {
-	listener net.Listener
+	listener  net.Listener
 	onRequest func(Request) error
 }
 
