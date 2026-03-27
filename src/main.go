@@ -154,8 +154,11 @@ func runDaemon() {
 	}
 	// Keep lockFile open for process lifetime (lock released on exit)
 
-	// Set macOS dock icon
-	macos.SetDockIcon(dockIconBytes)
+	// Set macOS dock icon (deferred so Cocoa run loop is ready)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		macos.SetDockIcon(dockIconBytes)
+	}()
 
 	// Ensure tmux is available
 	if err := tmux.EnsureInstalled(); err != nil {
