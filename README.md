@@ -148,4 +148,4 @@ You don't need to edit these manually — prompt-grid manages them for you.
 
 ## License
 
-MIT — do whatever you like with it.
+This project is licensed under [CC BY-NC 4.0](https://darren-static.waft.dev/license) - free to use and modify, but no commercial use without permission.
